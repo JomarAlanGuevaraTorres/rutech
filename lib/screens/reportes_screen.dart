@@ -12,19 +12,17 @@ class _ReportesScreenState extends State<ReportesScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
-  List<Map<String, dynamic>> _visitas = [];
-  List<Map<String, dynamic>> _visitasFiltradas = [];
+  List<Map<String, dynamic>> _rutas = [];
+  // mapa rutaId → lista de visitas
+  final Map<int, List<Map<String, dynamic>>> _visitasPorRuta = {};
+  // qué rutas están expandidas
+  final Set<int> _expandidas = {};
   bool _cargando = true;
-
-  // Filtro seguimiento
-  bool _soloInteresados = false;
-  bool _soloConPromesa = false;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
-    _tabController.addListener(() => _aplicarFiltros());
+    _tabController = TabController(length: 2, vsync: this);
     _cargarDatos();
   }
 
@@ -36,175 +34,233 @@ class _ReportesScreenState extends State<ReportesScreen>
 
   Future<void> _cargarDatos() async {
     setState(() => _cargando = true);
-    final visitas = await DBHelper.getVisitasConCliente();
+    final rutas = await DBHelper.getRutasEjecutadas();
     setState(() {
-      _visitas = visitas;
+      _rutas = rutas;
       _cargando = false;
+      _visitasPorRuta.clear();
+      _expandidas.clear();
     });
-    _aplicarFiltros();
-    _verificarPromesasVencidas();
   }
 
-  void _aplicarFiltros() {
-    final ahora = DateTime.now();
-    List<Map<String, dynamic>> resultado = List.from(_visitas);
-
-    // Filtro por período según tab
-    resultado = resultado.where((v) {
-      final fechaStr = v['fecha'] as String? ?? '';
-      if (fechaStr.isEmpty) return false;
-      final fecha = DateTime.tryParse(fechaStr);
-      if (fecha == null) return false;
-
-      switch (_tabController.index) {
-        case 0: // Hoy
-          return fecha.year == ahora.year &&
-              fecha.month == ahora.month &&
-              fecha.day == ahora.day;
-        case 1: // Semana
-          final inicio = ahora.subtract(Duration(days: ahora.weekday - 1));
-          final fin = inicio.add(const Duration(days: 6));
-          return fecha.isAfter(inicio.subtract(const Duration(days: 1))) &&
-              fecha.isBefore(fin.add(const Duration(days: 1)));
-        case 2: // Mes
-          return fecha.year == ahora.year && fecha.month == ahora.month;
-        default:
-          return true;
-      }
-    }).toList();
-
-    // Filtro interesados
-    if (_soloInteresados) {
-      resultado =
-          resultado.where((v) => (v['interesado'] as int? ?? -1) == 1).toList();
-    }
-
-    // Filtro promesa de pago
-    if (_soloConPromesa) {
-      resultado = resultado
-          .where((v) =>
-      (v['resultado'] as String? ?? '').isNotEmpty &&
-          (v['encontrado'] as int? ?? 0) == 1)
-          .toList();
-    }
-
-    setState(() => _visitasFiltradas = resultado);
+  Future<List<Map<String, dynamic>>> _cargarVisitasDeRuta(int rutaId) async {
+    if (_visitasPorRuta.containsKey(rutaId)) return _visitasPorRuta[rutaId]!;
+    final visitas = await DBHelper.getVisitasDeLaRuta(rutaId);
+    _visitasPorRuta[rutaId] = visitas;
+    return visitas;
   }
 
-  // ── Verificar promesas vencidas o próximas ──
-  void _verificarPromesasVencidas() {
-    final hoy = DateTime.now();
-    final proximas = _visitas.where((v) {
-      final resultado = v['resultado'] as String? ?? '';
-      if (resultado.isEmpty) return false;
-      // Buscar si tiene formato de fecha dd/mm/yyyy
-      final regex = RegExp(r'(\d{2})/(\d{2})/(\d{4})');
-      final match = regex.firstMatch(resultado);
-      if (match == null) return false;
-      final fecha = DateTime(
-        int.parse(match.group(3)!),
-        int.parse(match.group(2)!),
-        int.parse(match.group(1)!),
-      );
-      final diff = fecha.difference(hoy).inDays;
-      return diff >= 0 && diff <= 3; // próximos 3 días
-    }).toList();
-
-    if (proximas.isNotEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _mostrarAlertaPromesas(proximas);
+  Future<void> _toggleExpandir(int rutaId) async {
+    if (_expandidas.contains(rutaId)) {
+      setState(() => _expandidas.remove(rutaId));
+    } else {
+      final visitas = await _cargarVisitasDeRuta(rutaId);
+      setState(() {
+        _visitasPorRuta[rutaId] = visitas;
+        _expandidas.add(rutaId);
       });
     }
   }
 
-  void _mostrarAlertaPromesas(List<Map<String, dynamic>> proximas) {
-    showDialog(
+  Future<void> _eliminarRuta(int rutaId) async {
+    final confirmar = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        shape:
-        RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        title: Row(
-          children: [
-            const Icon(Icons.warning_amber_rounded,
-                color: AppColors.prioMedia, size: 22),
-            const SizedBox(width: 8),
-            Text('${proximas.length} promesa${proximas.length > 1 ? 's' : ''} próxima${proximas.length > 1 ? 's' : ''}',
-                style: const TextStyle(
-                    fontSize: 15, fontWeight: FontWeight.w600)),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Clientes morosos con promesa de pago en los próximos 3 días:',
-                style: TextStyle(fontSize: 12, color: AppColors.text2)),
-            const SizedBox(height: 10),
-            ...proximas.map((v) => Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: Row(
-                children: [
-                  const Icon(Icons.circle,
-                      size: 6, color: AppColors.prioAlta),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      v['nombre'] ?? 'Cliente',
-                      style: const TextStyle(
-                          fontSize: 13, fontWeight: FontWeight.w500),
-                    ),
-                  ),
-                ],
-              ),
-            )),
-          ],
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: const Text('¿Eliminar ruta?',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+        content: const Text(
+            'Se eliminarán la ruta y todas sus visitas. Esta acción no se puede deshacer.',
+            style: TextStyle(fontSize: 13, color: AppColors.text2)),
         actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancelar',
+                style: TextStyle(color: AppColors.text2)),
+          ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.verde,
+              backgroundColor: AppColors.prioAlta,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(8)),
             ),
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Entendido'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Eliminar'),
           ),
         ],
       ),
     );
+    if (confirmar == true) {
+      await DBHelper.eliminarRuta(rutaId);
+      _cargarDatos();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Ruta eliminada'),
+          backgroundColor: AppColors.prioAlta,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
   }
 
-  // ── Estadísticas calculadas ──
-  Map<String, dynamic> _calcularStats(List<Map<String, dynamic>> visitas) {
-    final total = visitas.length;
-    final encontrados =
-        visitas.where((v) => (v['encontrado'] as int? ?? 0) == 1).length;
-    final noEncontrados = total - encontrados;
-    final interesados =
-        visitas.where((v) => (v['interesado'] as int? ?? -1) == 1).length;
-    final noInteresados =
-        visitas.where((v) => (v['interesado'] as int? ?? -1) == 0).length;
-    final conPromesa = visitas
-        .where((v) =>
-    (v['resultado'] as String? ?? '').isNotEmpty &&
-        (v['encontrado'] as int? ?? 0) == 1)
-        .length;
+  Future<void> _editarVisita(Map<String, dynamic> visita, int rutaId) async {
+    final notasCtrl =
+    TextEditingController(text: visita['resultado'] as String? ?? '');
+    bool? encontrado = _intToBool(visita['encontrado'] as int? ?? -1);
+    bool? interesado = _intToBool(visita['interesado'] as int? ?? -1);
 
-    final pctEfectividad =
-    total > 0 ? (encontrados / total * 100).round() : 0;
-    final pctInteres =
-    encontrados > 0 ? (interesados / encontrados * 100).round() : 0;
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModal) => Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+            left: 20, right: 20, top: 20,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                    width: 36, height: 4,
+                    decoration: BoxDecoration(
+                        color: Colors.grey[300],
+                        borderRadius: BorderRadius.circular(2))),
+              ),
+              const SizedBox(height: 16),
+              Text(visita['nombre'] ?? 'Editar visita',
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w600)),
+              Text('${_formatFecha(visita['fecha'] ?? '')} · ${visita['hora'] ?? ''}',
+                  style: const TextStyle(
+                      fontSize: 11, color: AppColors.text3)),
+              const SizedBox(height: 16),
+              const Text('¿Encontrado?',
+                  style: TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w500)),
+              const SizedBox(height: 8),
+              Row(children: [
+                _chipEditar('Sí', encontrado == true, AppColors.prioBaja,
+                        () => setModal(() => encontrado = true)),
+                const SizedBox(width: 8),
+                _chipEditar('No', encontrado == false, AppColors.prioAlta,
+                        () => setModal(() {
+                      encontrado = false;
+                      interesado = null;
+                    })),
+              ]),
+              if (encontrado == true) ...[
+                const SizedBox(height: 14),
+                const Text('¿Interesado?',
+                    style: TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w500)),
+                const SizedBox(height: 8),
+                Row(children: [
+                  _chipEditar('Sí', interesado == true, AppColors.prioBaja,
+                          () => setModal(() => interesado = true)),
+                  const SizedBox(width: 8),
+                  _chipEditar('No', interesado == false, AppColors.prioAlta,
+                          () => setModal(() => interesado = false)),
+                ]),
+              ],
+              const SizedBox(height: 14),
+              const Text('Notas',
+                  style: TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w500)),
+              const SizedBox(height: 8),
+              TextField(
+                controller: notasCtrl,
+                maxLines: 3,
+                decoration: InputDecoration(
+                  hintText: 'Observaciones...',
+                  hintStyle: const TextStyle(
+                      fontSize: 12, color: AppColors.text3),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: AppColors.border)),
+                  focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: AppColors.verde)),
+                  isDense: true,
+                  contentPadding: const EdgeInsets.all(10),
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.amarillo,
+                    foregroundColor: AppColors.verdeDark,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                  ),
+                  onPressed: () async {
+                    await DBHelper.actualizarVisita(
+                      id: visita['id'] as int,
+                      encontrado: encontrado == true ? 1 : (encontrado == false ? 0 : -1),
+                      interesado: interesado == true ? 1 : (interesado == false ? 0 : -1),
+                      resultado: notasCtrl.text.trim(),
+                    );
+                    // Recargar visitas de esa ruta
+                    final nuevas = await DBHelper.getVisitasDeLaRuta(rutaId);
+                    setState(() => _visitasPorRuta[rutaId] = nuevas);
+                    if (ctx.mounted) Navigator.pop(ctx);
+                  },
+                  child: const Text('Guardar cambios',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+              const SizedBox(height: 20),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  bool? _intToBool(int v) {
+    if (v == 1) return true;
+    if (v == 0) return false;
+    return null;
+  }
+
+  // ── Estadísticas globales de todas las rutas ──
+  Map<String, dynamic> _calcularStats() {
+    int totalVisitas = 0, encontrados = 0, interesados = 0;
+    for (final visitas in _visitasPorRuta.values) {
+      totalVisitas += visitas.length;
+      encontrados += visitas.where((v) => (v['encontrado'] as int? ?? -1) == 1).length;
+      interesados += visitas.where((v) => (v['interesado'] as int? ?? -1) == 1).length;
+    }
+
+    // Si hay rutas sin cargar, usar totales del encabezado
+    int encEncontrados = 0, encInteresados = 0, encVisitados = 0;
+    for (final r in _rutas) {
+      encVisitados += (r['visitados'] as int? ?? 0);
+      encEncontrados += (r['encontrados'] as int? ?? 0);
+      encInteresados += (r['interesados'] as int? ?? 0);
+    }
+
+    final totalGlobal = encVisitados > 0 ? encVisitados : totalVisitas;
+    final encG = encEncontrados > 0 ? encEncontrados : encontrados;
+    final intG = encInteresados > 0 ? encInteresados : interesados;
 
     return {
-      'total': total,
-      'encontrados': encontrados,
-      'noEncontrados': noEncontrados,
-      'interesados': interesados,
-      'noInteresados': noInteresados,
-      'conPromesa': conPromesa,
-      'pctEfectividad': pctEfectividad,
-      'pctInteres': pctInteres,
+      'totalRutas': _rutas.length,
+      'totalVisitas': totalGlobal,
+      'encontrados': encG,
+      'noEncontrados': totalGlobal - encG,
+      'interesados': intG,
+      'noInteresados': encG - intG,
+      'pctContacto': totalGlobal > 0 ? (encG / totalGlobal * 100).toStringAsFixed(0) : '0',
+      'pctInteres': encG > 0 ? (intG / encG * 100).toStringAsFixed(0) : '0',
     };
   }
 
@@ -220,15 +276,17 @@ class _ReportesScreenState extends State<ReportesScreen>
         children: [
           _buildTopbar(),
           _buildTabs(),
-          _buildFiltrosSeguimiento(),
           Expanded(
             child: _cargando
                 ? const Center(
-                child:
-                CircularProgressIndicator(color: AppColors.verde))
-                : _visitasFiltradas.isEmpty
-                ? _buildVacio()
-                : _buildContenido(),
+                child: CircularProgressIndicator(color: AppColors.verde))
+                : TabBarView(
+              controller: _tabController,
+              children: [
+                _buildTabRutas(),
+                _buildTabEstadisticas(),
+              ],
+            ),
           ),
         ],
       ),
@@ -241,17 +299,18 @@ class _ReportesScreenState extends State<ReportesScreen>
       padding: const EdgeInsets.fromLTRB(16, 48, 16, 12),
       child: Row(
         children: [
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Reportes',
+                const Text('Reportes',
                     style: TextStyle(
                         color: Colors.white,
                         fontSize: 16,
                         fontWeight: FontWeight.w600)),
-                Text('Gestión de campo',
-                    style: TextStyle(
+                Text(
+                    '${_rutas.length} ruta${_rutas.length != 1 ? 's' : ''} ejecutada${_rutas.length != 1 ? 's' : ''}',
+                    style: const TextStyle(
                         color: Color(0xFFA8D5B5), fontSize: 11)),
               ],
             ),
@@ -259,13 +318,12 @@ class _ReportesScreenState extends State<ReportesScreen>
           GestureDetector(
             onTap: _cargarDatos,
             child: Container(
-              padding: const EdgeInsets.all(6),
+              padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
                 color: Colors.white.withOpacity(0.15),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: const Icon(Icons.refresh,
-                  color: Colors.white, size: 18),
+              child: const Icon(Icons.refresh, color: Colors.white, size: 18),
             ),
           ),
         ],
@@ -282,168 +340,693 @@ class _ReportesScreenState extends State<ReportesScreen>
         indicatorWeight: 3,
         labelColor: Colors.white,
         unselectedLabelColor: Colors.white54,
-        labelStyle: const TextStyle(
-            fontSize: 13, fontWeight: FontWeight.w600),
+        labelStyle:
+        const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
         tabs: const [
-          Tab(text: 'Hoy'),
-          Tab(text: 'Semana'),
-          Tab(text: 'Mes'),
+          Tab(text: 'Rutas ejecutadas'),
+          Tab(text: 'Estadísticas'),
         ],
       ),
     );
   }
 
-  Widget _buildFiltrosSeguimiento() {
+  // ─── TAB 1: Rutas ejecutadas ─────────────────────────
+
+  Widget _buildTabRutas() {
+    if (_rutas.isEmpty) {
+      return _buildVacio(
+        'Sin rutas ejecutadas aún',
+        'Ejecuta tu primera ruta en la sección "Armar Ruta"',
+        Icons.route,
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(12),
+      itemCount: _rutas.length,
+      itemBuilder: (ctx, i) => _buildCardRuta(_rutas[i]),
+    );
+  }
+
+  Widget _buildCardRuta(Map<String, dynamic> ruta) {
+    final rutaId = ruta['id'] as int;
+    final expandida = _expandidas.contains(rutaId);
+    final fecha = _formatFecha(ruta['fecha'] as String? ?? '');
+    final horaInicio = ruta['hora_inicio'] as String? ?? '--:--';
+    final horaFin = ruta['hora_fin'] as String? ?? '--:--';
+    final totalPuntos = ruta['total_puntos'] as int? ?? 0;
+    final visitados = ruta['visitados'] as int? ?? 0;
+    final encontrados = ruta['encontrados'] as int? ?? 0;
+    final interesados = ruta['interesados'] as int? ?? 0;
+    final distancia = ruta['distancia_km'] as double? ?? 0.0;
+
+    final pctContacto = visitados > 0
+        ? (encontrados / visitados * 100).toStringAsFixed(0)
+        : '0';
+
     return Container(
-      color: Colors.white,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Row(
-        children: [
-          const Text('Filtrar:',
-              style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.text3)),
-          const SizedBox(width: 8),
-          _chipFiltro(
-            'Interesados',
-            _soloInteresados,
-            const Color(0xFF378ADD),
-                () => setState(() {
-              _soloInteresados = !_soloInteresados;
-              _aplicarFiltros();
-            }),
-          ),
-          const SizedBox(width: 6),
-          _chipFiltro(
-            'Con promesa',
-            _soloConPromesa,
-            AppColors.prioMedia,
-                () => setState(() {
-              _soloConPromesa = !_soloConPromesa;
-              _aplicarFiltros();
-            }),
-          ),
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border, width: 0.5),
+        boxShadow: [
+          BoxShadow(
+              color: Colors.black.withOpacity(0.04),
+              blurRadius: 6,
+              offset: const Offset(0, 2))
         ],
       ),
-    );
-  }
-
-  Widget _chipFiltro(
-      String label, bool activo, Color color, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding:
-        const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: activo ? color : Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-              color: activo ? color : AppColors.border, width: 1.5),
-        ),
-        child: Text(label,
-            style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: activo ? Colors.white : AppColors.text2)),
-      ),
-    );
-  }
-
-  Widget _buildVacio() {
-    return Center(
       child: Column(
-        mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.bar_chart, size: 48, color: AppColors.text3),
-          const SizedBox(height: 12),
-          const Text('Sin visitas registradas',
-              style: TextStyle(color: AppColors.text2, fontSize: 14)),
-          const SizedBox(height: 4),
-          const Text('Las visitas aparecerán aquí al ejecutar rutas',
-              style: TextStyle(color: AppColors.text3, fontSize: 12)),
-          const SizedBox(height: 16),
-          TextButton(
-            onPressed: () => setState(() {
-              _soloInteresados = false;
-              _soloConPromesa = false;
-              _aplicarFiltros();
-            }),
-            child: const Text('Quitar filtros',
-                style: TextStyle(color: AppColors.verde)),
+          // ── Encabezado de la ruta ──
+          InkWell(
+            onTap: () => _toggleExpandir(rutaId),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      // Ícono ruta
+                      Container(
+                        width: 40, height: 40,
+                        decoration: BoxDecoration(
+                          color: AppColors.verdeLt,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Icon(Icons.route,
+                            color: AppColors.verde, size: 22),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Ruta del $fecha',
+                                style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                    color: AppColors.text)),
+                            Text('$horaInicio → $horaFin · ${distancia.toStringAsFixed(1)} km',
+                                style: const TextStyle(
+                                    fontSize: 11, color: AppColors.text3)),
+                          ],
+                        ),
+                      ),
+                      // Menú eliminar
+                      PopupMenuButton<String>(
+                        icon: const Icon(Icons.more_vert,
+                            color: AppColors.text3, size: 18),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10)),
+                        onSelected: (val) {
+                          if (val == 'eliminar') _eliminarRuta(rutaId);
+                        },
+                        itemBuilder: (_) => [
+                          const PopupMenuItem(
+                            value: 'eliminar',
+                            child: Row(
+                              children: [
+                                Icon(Icons.delete_outline,
+                                    color: AppColors.prioAlta, size: 16),
+                                SizedBox(width: 8),
+                                Text('Eliminar ruta',
+                                    style: TextStyle(
+                                        fontSize: 13,
+                                        color: AppColors.prioAlta)),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      // Flecha expandir
+                      AnimatedRotation(
+                        turns: expandida ? 0.5 : 0,
+                        duration: const Duration(milliseconds: 200),
+                        child: const Icon(Icons.keyboard_arrow_down,
+                            color: AppColors.text3, size: 22),
+                      ),
+                    ],
+                  ),
+
+                  const SizedBox(height: 12),
+
+                  // Stats horizontales
+                  Row(
+                    children: [
+                      _miniStat('$totalPuntos', 'Paradas', AppColors.text2),
+                      _divider(),
+                      _miniStat('$visitados', 'Gestión.', AppColors.verde),
+                      _divider(),
+                      _miniStat('$encontrados', 'Encontr.', AppColors.prioBaja),
+                      _divider(),
+                      _miniStat('$interesados', 'Interes.', const Color(0xFF378ADD)),
+                      _divider(),
+                      _miniStat('$pctContacto%', 'Efectiv.', AppColors.prioMedia),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           ),
+
+          // ── Detalle expandible ──
+          if (expandida) ...[
+            const Divider(height: 1, color: AppColors.border),
+            _buildDetalleRuta(rutaId, totalPuntos),
+          ],
         ],
       ),
     );
   }
 
-  Widget _buildContenido() {
-    final stats = _calcularStats(_visitasFiltradas);
+  Widget _buildDetalleRuta(int rutaId, int totalPuntos) {
+    final visitas = _visitasPorRuta[rutaId] ?? [];
+
+    if (visitas.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(16),
+        child: Center(
+          child: Text('Sin visitas registradas en esta ruta',
+              style: TextStyle(fontSize: 12, color: AppColors.text3)),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(14, 12, 14, 6),
+          child: Text('DETALLE DE PARADAS',
+              style: TextStyle(
+                  fontSize: 9,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.text3,
+                  letterSpacing: 1)),
+        ),
+        ...visitas.asMap().entries.map((e) {
+          final idx = e.key;
+          final v = e.value;
+          return _buildFilaVisita(v, idx, visitas.length, rutaId);
+        }),
+        const SizedBox(height: 8),
+      ],
+    );
+  }
+
+  Widget _buildFilaVisita(
+      Map<String, dynamic> v, int idx, int total, int rutaId) {
+    final nombre = v['nombre'] as String? ?? 'Cliente';
+    final encontrado = v['encontrado'] as int? ?? -1;
+    final interesado = v['interesado'] as int? ?? -1;
+    final notas = v['resultado'] as String? ?? '';
+    final hora = v['hora'] as String? ?? '';
+    final esUltimo = idx == total - 1;
+
+    // Colores según resultado
+    Color iconColor;
+    IconData iconData;
+    Color bgIcon;
+    if (encontrado == 1 && interesado == 1) {
+      iconColor = const Color(0xFF378ADD);
+      iconData = Icons.thumb_up_outlined;
+      bgIcon = const Color(0xFFE3F2FD);
+    } else if (encontrado == 1 && interesado == 0) {
+      iconColor = AppColors.prioMedia;
+      iconData = Icons.thumb_down_outlined;
+      bgIcon = const Color(0xFFFFF3E0);
+    } else if (encontrado == 1) {
+      iconColor = AppColors.prioBaja;
+      iconData = Icons.check_circle_outline;
+      bgIcon = const Color(0xFFE8F5E9);
+    } else if (encontrado == 0) {
+      iconColor = AppColors.prioAlta;
+      iconData = Icons.person_off_outlined;
+      bgIcon = const Color(0xFFFFEBEE);
+    } else {
+      iconColor = AppColors.text3;
+      iconData = Icons.help_outline;
+      bgIcon = AppColors.bg;
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        border: esUltimo
+            ? null
+            : const Border(
+            bottom: BorderSide(color: AppColors.border, width: 0.5)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Número + línea de tiempo
+            Column(
+              children: [
+                Container(
+                  width: 28, height: 28,
+                  decoration: BoxDecoration(
+                    color: bgIcon,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(iconData, color: iconColor, size: 15),
+                ),
+                if (!esUltimo)
+                  Container(
+                      width: 1.5, height: 20,
+                      color: AppColors.border),
+              ],
+            ),
+            const SizedBox(width: 12),
+
+            // Info principal
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Número + nombre + hora
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: AppColors.bg,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text('${idx + 1}',
+                            style: const TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.text3)),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(nombre,
+                            style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.text),
+                            overflow: TextOverflow.ellipsis),
+                      ),
+                      if (hora.isNotEmpty)
+                        Text(hora,
+                            style: const TextStyle(
+                                fontSize: 10, color: AppColors.text3)),
+                    ],
+                  ),
+
+                  const SizedBox(height: 5),
+
+                  // Badges resultado
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 3,
+                    children: [
+                      if (encontrado == 1)
+                        _badge('✓ Encontrado', AppColors.prioBaja),
+                      if (encontrado == 0)
+                        _badge('✗ No encontrado', AppColors.prioAlta),
+                      if (encontrado == 1 && interesado == 1)
+                        _badge('✓ Interesado', const Color(0xFF378ADD)),
+                      if (encontrado == 1 && interesado == 0)
+                        _badge('✗ No interesado', AppColors.prioMedia),
+                    ],
+                  ),
+
+                  // Notas
+                  if (notas.isNotEmpty) ...[
+                    const SizedBox(height: 5),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: AppColors.bg,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(notas,
+                          style: const TextStyle(
+                              fontSize: 11,
+                              color: AppColors.text2,
+                              fontStyle: FontStyle.italic),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis),
+                    ),
+                  ],
+
+                  const SizedBox(height: 6),
+                ],
+              ),
+            ),
+
+            // Botón editar
+            GestureDetector(
+              onTap: () => _editarVisita(v, rutaId),
+              child: Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: AppColors.verdeLt,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Icon(Icons.edit_outlined,
+                    color: AppColors.verde, size: 14),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ─── TAB 2: Estadísticas ─────────────────────────────
+
+  Widget _buildTabEstadisticas() {
+    if (_rutas.isEmpty) {
+      return _buildVacio(
+          'Sin datos aún',
+          'Las estadísticas aparecen cuando ejecutes rutas',
+          Icons.bar_chart);
+    }
+
+    final stats = _calcularStats();
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Estadísticas ──
-          _buildStats(stats),
-          const SizedBox(height: 16),
-
-          // ── Métricas detalle ──
-          _buildMetricas(stats),
-          const SizedBox(height: 16),
-
-          // ── Lista de visitas ──
-          const Text('DETALLE DE VISITAS',
+          // Resumen general
+          const Text('RESUMEN GENERAL',
               style: TextStyle(
                   fontSize: 10,
                   fontWeight: FontWeight.w700,
                   color: AppColors.text3,
                   letterSpacing: 1)),
           const SizedBox(height: 8),
-          ..._visitasFiltradas.map((v) => _buildCardVisita(v)),
+          Row(
+            children: [
+              _statBox('${stats['totalRutas']}', 'Rutas\nejecutadas',
+                  AppColors.verde),
+              const SizedBox(width: 8),
+              _statBox('${stats['totalVisitas']}', 'Total\nvisitas',
+                  AppColors.text2),
+              const SizedBox(width: 8),
+              _statBox('${stats['interesados']}', 'Total\ninteresados',
+                  const Color(0xFF378ADD)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              _statBox('${stats['encontrados']}', 'Encontrados',
+                  AppColors.prioBaja),
+              const SizedBox(width: 8),
+              _statBox('${stats['noEncontrados']}', 'No\nencontrados',
+                  AppColors.prioAlta),
+              const SizedBox(width: 8),
+              _statBox('${stats['noInteresados']}', 'No\ninteresados',
+                  AppColors.prioMedia),
+            ],
+          ),
+
+          const SizedBox(height: 20),
+
+          // Efectividad
+          const Text('EFECTIVIDAD',
+              style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.text3,
+                  letterSpacing: 1)),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.border, width: 0.5),
+            ),
+            child: Column(
+              children: [
+                _metricaFila(
+                  'Tasa de contacto',
+                  '${stats['pctContacto']}%',
+                  (int.tryParse(stats['pctContacto'] as String) ?? 0) / 100,
+                  AppColors.prioBaja,
+                ),
+                const SizedBox(height: 14),
+                _metricaFila(
+                  'Tasa de interés (sobre encontrados)',
+                  '${stats['pctInteres']}%',
+                  (int.tryParse(stats['pctInteres'] as String) ?? 0) / 100,
+                  const Color(0xFF378ADD),
+                ),
+                const SizedBox(height: 14),
+                _metricaFila(
+                  'Conversión total (interesados/visitas)',
+                  stats['totalVisitas'] > 0
+                      ? '${(stats['interesados'] / stats['totalVisitas'] * 100).toStringAsFixed(0)}%'
+                      : '0%',
+                  stats['totalVisitas'] > 0
+                      ? (stats['interesados'] / stats['totalVisitas'])
+                      .clamp(0.0, 1.0)
+                      : 0.0,
+                  AppColors.verde,
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // Rendimiento por ruta
+          const Text('RENDIMIENTO POR RUTA',
+              style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.text3,
+                  letterSpacing: 1)),
+          const SizedBox(height: 8),
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.border, width: 0.5),
+            ),
+            child: Column(
+              children: [
+                // Cabecera tabla
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 8),
+                  decoration: const BoxDecoration(
+                    color: AppColors.bg,
+                    borderRadius:
+                    BorderRadius.vertical(top: Radius.circular(12)),
+                  ),
+                  child: const Row(
+                    children: [
+                      Expanded(
+                          flex: 3,
+                          child: Text('Fecha',
+                              style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.text3))),
+                      Expanded(
+                          child: Text('Visitas',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.text3))),
+                      Expanded(
+                          child: Text('Encont.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.text3))),
+                      Expanded(
+                          child: Text('Interes.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.text3))),
+                    ],
+                  ),
+                ),
+                ..._rutas.map((r) {
+                  final fecha = _formatFecha(r['fecha'] as String? ?? '');
+                  final visitados = r['visitados'] as int? ?? 0;
+                  final encontrados = r['encontrados'] as int? ?? 0;
+                  final interesados = r['interesados'] as int? ?? 0;
+                  return Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                    decoration: const BoxDecoration(
+                      border: Border(
+                          bottom: BorderSide(
+                              color: AppColors.border, width: 0.5)),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                            flex: 3,
+                            child: Text(fecha,
+                                style: const TextStyle(
+                                    fontSize: 12,
+                                    color: AppColors.text))),
+                        Expanded(
+                            child: Text('$visitados',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: AppColors.verde))),
+                        Expanded(
+                            child: Text('$encontrados',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: AppColors.prioBaja))),
+                        Expanded(
+                            child: Text('$interesados',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF378ADD)))),
+                      ],
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // Distribución
+          const Text('DISTRIBUCIÓN DE RESULTADOS',
+              style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.text3,
+                  letterSpacing: 1)),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.border, width: 0.5),
+            ),
+            child: Column(
+              children: [
+                _distribucionFila('Encontrado + Interesado',
+                    stats['interesados'] as int,
+                    stats['totalVisitas'] as int,
+                    const Color(0xFF378ADD)),
+                const SizedBox(height: 10),
+                _distribucionFila('Encontrado + No interesado',
+                    stats['noInteresados'] as int,
+                    stats['totalVisitas'] as int,
+                    AppColors.prioMedia),
+                const SizedBox(height: 10),
+                _distribucionFila('No encontrado',
+                    stats['noEncontrados'] as int,
+                    stats['totalVisitas'] as int,
+                    AppColors.prioAlta),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
         ],
       ),
     );
   }
 
-  Widget _buildStats(Map<String, dynamic> stats) {
-    return Column(
-      children: [
-        Row(
+  // ─── Helpers ─────────────────────────────────────────
+
+  String _formatFecha(String fecha) {
+    if (fecha.isEmpty) return 'Sin fecha';
+    try {
+      final p = fecha.split('-');
+      if (p.length == 3) return '${p[2]}/${p[1]}/${p[0]}';
+    } catch (_) {}
+    return fecha;
+  }
+
+  Widget _buildVacio(String titulo, String subtitulo, IconData icono) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            _statBox('${stats['total']}', 'Total\ngestionados',
-                AppColors.verde),
-            const SizedBox(width: 8),
-            _statBox('${stats['encontrados']}', 'Encontrados',
-                AppColors.prioBaja),
-            const SizedBox(width: 8),
-            _statBox('${stats['interesados']}', 'Interesados',
-                const Color(0xFF378ADD)),
+            Icon(icono, size: 52, color: AppColors.text3),
+            const SizedBox(height: 12),
+            Text(titulo,
+                style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.text2)),
+            const SizedBox(height: 6),
+            Text(subtitulo,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 12, color: AppColors.text3)),
           ],
         ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            _statBox('${stats['noEncontrados']}', 'No\nencontrados',
-                AppColors.prioAlta),
-            const SizedBox(width: 8),
-            _statBox('${stats['noInteresados']}', 'No\ninteresados',
-                AppColors.prioMedia),
-            const SizedBox(width: 8),
-            _statBox('${stats['conPromesa']}', 'Con\npromesa',
-                const Color(0xFF9B59B6)),
-          ],
-        ),
-      ],
+      ),
+    );
+  }
+
+  Widget _miniStat(String valor, String label, Color color) {
+    return Expanded(
+      child: Column(
+        children: [
+          Text(valor,
+              style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: color)),
+          Text(label,
+              style: const TextStyle(fontSize: 9, color: AppColors.text3)),
+        ],
+      ),
+    );
+  }
+
+  Widget _divider() => Container(
+      width: 1, height: 28, color: AppColors.border,
+      margin: const EdgeInsets.symmetric(horizontal: 4));
+
+  Widget _badge(String texto, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Text(texto,
+          style: TextStyle(
+              fontSize: 10, fontWeight: FontWeight.w600, color: color)),
     );
   }
 
   Widget _statBox(String valor, String label, Color color) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 12),
+        padding: const EdgeInsets.symmetric(vertical: 14),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(10),
@@ -453,9 +1036,7 @@ class _ReportesScreenState extends State<ReportesScreen>
           children: [
             Text(valor,
                 style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w700,
-                    color: color)),
+                    fontSize: 22, fontWeight: FontWeight.w700, color: color)),
             const SizedBox(height: 2),
             Text(label,
                 textAlign: TextAlign.center,
@@ -463,42 +1044,6 @@ class _ReportesScreenState extends State<ReportesScreen>
                     fontSize: 9, color: AppColors.text3, height: 1.3)),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildMetricas(Map<String, dynamic> stats) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border, width: 0.5),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('MÉTRICAS',
-              style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.text3,
-                  letterSpacing: 1)),
-          const SizedBox(height: 12),
-          _metricaFila(
-            'Efectividad de contacto',
-            '${stats['pctEfectividad']}%',
-            stats['pctEfectividad'] / 100,
-            AppColors.prioBaja,
-          ),
-          const SizedBox(height: 10),
-          _metricaFila(
-            'Tasa de interés',
-            '${stats['pctInteres']}%',
-            stats['pctInteres'] / 100,
-            const Color(0xFF378ADD),
-          ),
-        ],
       ),
     );
   }
@@ -511,12 +1056,14 @@ class _ReportesScreenState extends State<ReportesScreen>
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(label,
-                style: const TextStyle(
-                    fontSize: 12, color: AppColors.text2)),
+            Expanded(
+              child: Text(label,
+                  style: const TextStyle(
+                      fontSize: 12, color: AppColors.text2)),
+            ),
             Text(valor,
                 style: TextStyle(
-                    fontSize: 12,
+                    fontSize: 13,
                     fontWeight: FontWeight.w700,
                     color: color)),
           ],
@@ -526,111 +1073,60 @@ class _ReportesScreenState extends State<ReportesScreen>
           borderRadius: BorderRadius.circular(4),
           child: LinearProgressIndicator(
             value: progreso.clamp(0.0, 1.0),
-            backgroundColor: AppColors.border,
+            backgroundColor: AppColors.bg,
             valueColor: AlwaysStoppedAnimation<Color>(color),
-            minHeight: 6,
+            minHeight: 8,
           ),
         ),
       ],
     );
   }
 
-  Widget _buildCardVisita(Map<String, dynamic> v) {
-    final encontrado = (v['encontrado'] as int? ?? 0) == 1;
-    final interesado = (v['interesado'] as int? ?? -1) == 1;
-    final noInteresado = (v['interesado'] as int? ?? -1) == 0;
-    final notas = v['resultado'] as String? ?? '';
-    final nombre = v['nombre'] as String? ?? 'Cliente';
-    final fecha = v['fecha'] as String? ?? '';
-    final hora = v['hora'] as String? ?? '';
-
-    // Detectar si tiene promesa de pago (formato dd/mm/yyyy)
-    final tienePromesa =
-    RegExp(r'\d{2}/\d{2}/\d{4}').hasMatch(notas);
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: interesado
-              ? const Color(0xFF378ADD).withOpacity(0.4)
-              : tienePromesa
-              ? AppColors.prioMedia.withOpacity(0.4)
-              : AppColors.border,
-          width: interesado || tienePromesa ? 1.5 : 0.5,
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Nombre y hora
-            Row(
-              children: [
-                Expanded(
-                  child: Text(nombre,
-                      style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600),
-                      overflow: TextOverflow.ellipsis),
-                ),
-                Text('$fecha $hora',
-                    style: const TextStyle(
-                        fontSize: 10, color: AppColors.text3)),
-              ],
-            ),
-            const SizedBox(height: 6),
-
-            // Badges de resultado
-            Wrap(
-              spacing: 6,
-              runSpacing: 4,
-              children: [
-                _badge(
-                  encontrado ? '✓ Encontrado' : '✗ No encontrado',
-                  encontrado ? AppColors.prioBaja : AppColors.prioAlta,
-                ),
-                if (encontrado && interesado)
-                  _badge('✓ Interesado', const Color(0xFF378ADD)),
-                if (encontrado && noInteresado)
-                  _badge('✗ No interesado', AppColors.prioMedia),
-                if (tienePromesa)
-                  _badge('📅 Promesa: $notas',
-                      const Color(0xFF9B59B6)),
-              ],
-            ),
-
-            // Notas
-            if (notas.isNotEmpty && !tienePromesa) ...[
-              const SizedBox(height: 6),
-              Text(notas,
-                  style: const TextStyle(
-                      fontSize: 11, color: AppColors.text2),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis),
-            ],
-          ],
-        ),
-      ),
+  Widget _distribucionFila(
+      String label, int valor, int total, Color color) {
+    final pct = total > 0 ? valor / total : 0.0;
+    return Row(
+      children: [
+        Container(
+            width: 10, height: 10,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+        const SizedBox(width: 8),
+        Expanded(
+            child: Text(label,
+                style: const TextStyle(
+                    fontSize: 12, color: AppColors.text2))),
+        Text('$valor',
+            style: TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w700, color: color)),
+        const SizedBox(width: 6),
+        Text('(${(pct * 100).toStringAsFixed(0)}%)',
+            style: const TextStyle(fontSize: 11, color: AppColors.text3)),
+      ],
     );
   }
 
-  Widget _badge(String texto, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: color.withOpacity(0.3)),
+  Widget _chipEditar(
+      String label, bool sel, Color color, VoidCallback onTap) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            color: sel ? color : Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border:
+            Border.all(color: sel ? color : AppColors.border, width: 1.5),
+          ),
+          child: Center(
+            child: Text(label,
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: sel ? Colors.white : AppColors.text2)),
+          ),
+        ),
       ),
-      child: Text(texto,
-          style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: color)),
     );
   }
 }

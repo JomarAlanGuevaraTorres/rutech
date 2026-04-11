@@ -15,18 +15,47 @@ class DBHelper {
     final path = join(await getDatabasesPath(), 'rutech.db');
     return await openDatabase(
       path,
-      version: 1,
+      version: 2,           // ← subimos a versión 2
       onCreate: _crearTablas,
+      onUpgrade: _migrarV2, // ← migración automática
     );
   }
+
   static Future<void> resetDB() async {
     final path = join(await getDatabasesPath(), 'rutech.db');
     await deleteDatabase(path);
     _db = null;
   }
 
+  // ── Migración v1 → v2 ────────────────────────────────
+  static Future<void> _migrarV2(Database db, int oldV, int newV) async {
+    if (oldV < 2) {
+      // Agregar ruta_id a visitas si no existe
+      final cols = await db.rawQuery('PRAGMA table_info(visitas)');
+      final nombres = cols.map((c) => c['name'].toString()).toSet();
+      if (!nombres.contains('ruta_id')) {
+        await db.execute('ALTER TABLE visitas ADD COLUMN ruta_id INTEGER');
+      }
+
+      // Crear tabla rutas_ejecutadas si no existe
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS rutas_ejecutadas (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          fecha TEXT NOT NULL,
+          hora_inicio TEXT,
+          hora_fin TEXT,
+          total_puntos INTEGER DEFAULT 0,
+          visitados INTEGER DEFAULT 0,
+          encontrados INTEGER DEFAULT 0,
+          interesados INTEGER DEFAULT 0,
+          distancia_km REAL,
+          notas TEXT
+        )
+      ''');
+    }
+  }
+
   static Future<void> _crearTablas(Database db, int version) async {
-    // Tabla clientes
     await db.execute('''
       CREATE TABLE clientes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,6 +119,22 @@ class DBHelper {
       )
     ''');
 
+    // ← NUEVA tabla de rutas ejecutadas
+    await db.execute('''
+      CREATE TABLE rutas_ejecutadas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT NOT NULL,
+        hora_inicio TEXT,
+        hora_fin TEXT,
+        total_puntos INTEGER DEFAULT 0,
+        visitados INTEGER DEFAULT 0,
+        encontrados INTEGER DEFAULT 0,
+        interesados INTEGER DEFAULT 0,
+        distancia_km REAL,
+        notas TEXT
+      )
+    ''');
+
     await db.execute('''
       CREATE TABLE rutas (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,7 +147,8 @@ class DBHelper {
         estado TEXT DEFAULT 'pendiente'
       )
     ''');
-  //caserios reales
+
+    // caseríos reales
     await db.execute('''
   INSERT INTO caserios (nombre, lat_centro, lng_centro) VALUES
   ('Oficina Principal Mi Banco', -5.238109, -79.451223),
@@ -220,10 +266,8 @@ class DBHelper {
   ('La perla',          -5.234781, -79.456417),
   ('Jimaca',            -5.221958, -79.448571),
   ('San Miguel de Cumbicus', -5.19791, -79.44214)
-  
 ''');
 
-    // ── Clientes de prueba vinculados a los caseríos ──
     await db.execute('''
       INSERT INTO clientes (dni, nombre, tipo, prioridad, lat_casa, lng_casa, tipo_ubicacion, caserio, estado, creado_en)
       VALUES
@@ -276,6 +320,7 @@ class DBHelper {
       'creado_en': ahora,
     });
   }
+
   static Future<List<Map<String, dynamic>>> getClientesConUbicacion() async {
     final db = await database;
     return await db.rawQuery('''
@@ -321,11 +366,13 @@ class DBHelper {
 
   static Future<Map<String, dynamic>?> buscarClientePorDni(String dni) async {
     final db = await database;
-    final result = await db.query('clientes', where: 'dni = ?', whereArgs: [dni]);
+    final result =
+    await db.query('clientes', where: 'dni = ?', whereArgs: [dni]);
     return result.isNotEmpty ? result.first : null;
   }
 
-  static Future<List<Map<String, dynamic>>> buscarClientesPorNombre(String texto) async {
+  static Future<List<Map<String, dynamic>>> buscarClientesPorNombre(
+      String texto) async {
     final db = await database;
     return await db.query(
       'clientes',
@@ -358,6 +405,107 @@ class DBHelper {
     final hoy = DateTime.now().toIso8601String().substring(0, 10);
     return await db.query('visitas', where: 'fecha = ?', whereArgs: [hoy]);
   }
+
+  // ─── RUTAS EJECUTADAS ────────────────────────────────
+
+  /// Guarda el encabezado de una ruta ejecutada y retorna su id.
+  static Future<int> insertRutaEjecutada({
+    required String fecha,
+    required String horaInicio,
+    required String horaFin,
+    required int totalPuntos,
+    required int visitados,
+    required int encontrados,
+    required int interesados,
+    double? distanciaKm,
+  }) async {
+    final db = await database;
+    return await db.insert('rutas_ejecutadas', {
+      'fecha': fecha,
+      'hora_inicio': horaInicio,
+      'hora_fin': horaFin,
+      'total_puntos': totalPuntos,
+      'visitados': visitados,
+      'encontrados': encontrados,
+      'interesados': interesados,
+      'distancia_km': distanciaKm,
+    });
+  }
+
+  /// Lista de rutas ejecutadas ordenadas por fecha desc.
+  static Future<List<Map<String, dynamic>>> getRutasEjecutadas() async {
+    final db = await database;
+    return await db.query('rutas_ejecutadas',
+        orderBy: 'fecha DESC, hora_inicio DESC');
+  }
+
+  /// Visitas de una ruta específica con nombre del cliente.
+  static Future<List<Map<String, dynamic>>> getVisitasDeLaRuta(
+      int rutaId) async {
+    final db = await database;
+    return await db.rawQuery('''
+      SELECT v.*,
+             COALESCE(c.nombre, t.nombre, 'Cliente') AS nombre,
+             c.tipo, c.caserio,
+             t.tipo_cliente, t.direccion, t.morosidad AS mora_tactico
+      FROM visitas v
+      LEFT JOIN clientes c ON v.cliente_id = c.id
+      LEFT JOIN tacticos t ON v.cliente_id = t.id
+      WHERE v.ruta_id = ?
+      ORDER BY v.id ASC
+    ''', [rutaId]);
+  }
+
+  /// Elimina una ruta y todas sus visitas.
+  static Future<void> eliminarRuta(int rutaId) async {
+    final db = await database;
+    await db.delete('visitas', where: 'ruta_id = ?', whereArgs: [rutaId]);
+    await db.delete('rutas_ejecutadas', where: 'id = ?', whereArgs: [rutaId]);
+  }
+
+  /// Elimina una visita individual.
+  static Future<void> eliminarVisita(int id) async {
+    final db = await database;
+    await db.delete('visitas', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Actualiza resultado de una visita.
+  static Future<void> actualizarVisita({
+    required int id,
+    required int encontrado,
+    required int interesado,
+    required String resultado,
+  }) async {
+    final db = await database;
+    await db.update(
+      'visitas',
+      {
+        'encontrado': encontrado,
+        'interesado': interesado,
+        'resultado': resultado,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// Todas las visitas (para estadísticas globales).
+  static Future<List<Map<String, dynamic>>> getTodasLasVisitas() async {
+    final db = await database;
+    return await db.rawQuery('''
+      SELECT v.*,
+             COALESCE(c.nombre, t.nombre, 'Cliente') AS nombre,
+             c.tipo, c.caserio,
+             t.tipo_cliente, t.direccion
+      FROM visitas v
+      LEFT JOIN clientes c ON v.cliente_id = c.id
+      LEFT JOIN tacticos t ON v.cliente_id = t.id
+      ORDER BY v.fecha DESC, v.hora DESC
+    ''');
+  }
+
+  // ─── TACTICOS ────────────────────────────────────────
+
   static Future<List<Map<String, dynamic>>> getTacticos() async {
     final db = await database;
     return await db.query('tacticos', orderBy: 'nombre ASC');
@@ -378,6 +526,7 @@ class DBHelper {
     }
     await batch.commit(noResult: true);
   }
+
   static Future<void> migrarTablas() async {
     final db = await database;
     final columnas = await db.rawQuery('PRAGMA table_info(tacticos)');
@@ -396,6 +545,7 @@ class DBHelper {
       await db.execute('ALTER TABLE tacticos ADD COLUMN lng REAL');
     }
   }
+
   static Future<List<Map<String, dynamic>>> getVisitasConCliente() async {
     final db = await database;
     return await db.rawQuery('''
