@@ -11,6 +11,7 @@ import 'screens/reportes_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const RuTechApp());
+  await DBHelper.limpiarRutasDuplicadas();
 }
 
 class RuTechApp extends StatelessWidget {

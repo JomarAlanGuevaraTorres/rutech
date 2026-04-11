@@ -40,6 +40,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
   final _promesaCtrl = TextEditingController();
 
   bool _rutaFinalizada = false;
+  // ── FIX: bandera para evitar doble guardado ──
+  bool _guardando = false;
   String _horaInicio = '';
 
   @override
@@ -93,7 +95,10 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
     final dLat = (b.latitude - a.latitude) * math.pi / 180;
     final dLng = (b.longitude - a.longitude) * math.pi / 180;
     final x = math.sin(dLat / 2) * math.sin(dLat / 2) +
-        math.cos(lat1) * math.cos(lat2) * math.sin(dLng / 2) * math.sin(dLng / 2);
+        math.cos(lat1) *
+            math.cos(lat2) *
+            math.sin(dLng / 2) *
+            math.sin(dLng / 2);
     return R * 2 * math.asin(math.sqrt(x));
   }
 
@@ -144,13 +149,13 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
     });
   }
 
-  // ── Guardar ruta completa en BD ──
-  Future<void> _guardarRutaEnBD() async {
+  // ── FIX: guardar ruta — usa resultado['nombre'] si no hay cliente_id válido ──
+  Future<void> _guardarRutaEnBD(List<Map<String, dynamic>> resultadosFinales) async {
     final fecha = DateTime.now().toIso8601String().substring(0, 10);
     final horaFin = _horaActual();
-    final visitados = _resultados.where((r) => r['registrado'] == true).length;
-    final encontrados = _resultados.where((r) => r['encontrado'] == true).length;
-    final interesados = _resultados.where((r) => r['interesado'] == true).length;
+    final visitados = resultadosFinales.where((r) => r['registrado'] == true).length;
+    final encontrados = resultadosFinales.where((r) => r['encontrado'] == true).length;
+    final interesados = resultadosFinales.where((r) => r['interesado'] == true).length;
 
     // 1. Crear encabezado de ruta
     final rutaId = await DBHelper.insertRutaEjecutada(
@@ -164,16 +169,26 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
       distanciaKm: _distanciaTotal(),
     );
 
-    // 2. Guardar cada visita con ruta_id
+    // 2. Guardar cada visita — FIX: sin nombre_cache (columna inexistente)
     for (int i = 0; i < widget.puntosRuta.length; i++) {
       final p = widget.puntosRuta[i];
-      final r = _resultados[i];
+      final r = resultadosFinales[i];
       if (r['registrado'] != true) continue;
 
       final clienteId = p['id'];
+      // IDs temporales (temp_xxx, cas_xxx) no son FK válidos
       final esIdValido = clienteId != null &&
-          clienteId.toString().startsWith('temp') == false &&
-          clienteId.toString().startsWith('cas') == false;
+          !clienteId.toString().startsWith('temp') &&
+          !clienteId.toString().startsWith('cas');
+
+      // resultado guardado como JSON en el campo 'resultado'
+      final String notasCompletas = [
+        if ((r['notas'] ?? '').toString().isNotEmpty) r['notas'],
+        if ((r['promesa_pago'] ?? '').toString().isNotEmpty)
+          'Promesa: ${r['promesa_pago']}',
+        // guardamos el nombre en notas si no hay FK válido
+        if (!esIdValido) 'Punto: ${p['nombre'] ?? ''}',
+      ].join(' | ');
 
       await DBHelper.insertVisita({
         'cliente_id': esIdValido ? clienteId : null,
@@ -181,17 +196,18 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
         'hora': r['hora'] ?? horaFin,
         'encontrado': r['encontrado'] == true ? 1 : (r['encontrado'] == false ? 0 : -1),
         'interesado': r['interesado'] == true ? 1 : (r['interesado'] == false ? 0 : -1),
-        'resultado': r['notas'] ?? '',
+        'resultado': notasCompletas,
         'lat_visita': null,
         'lng_visita': null,
         'ruta_id': rutaId,
-        // Guardar nombre aunque no tenga cliente_id válido
-        'nombre_cache': p['nombre'] ?? '',
       });
     }
   }
 
+  // ── FIX: registrar último punto y mostrar resumen SIN llamar _finalizarRuta ──
   Future<void> _registrarYAvanzar() async {
+    if (_guardando) return; // evita doble tap
+
     if (!_esCaserio) {
       if (_encontrado == null) {
         _mostrarSnack('Indica si encontraste al cliente', error: true);
@@ -214,14 +230,25 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
       'hora': _horaActual(),
     };
 
+    // Actualizar el resultado del índice actual
+    final nuevosResultados = List<Map<String, dynamic>>.from(_resultados);
+    nuevosResultados[_indiceActual] = resultado;
+
     setState(() {
-      _resultados[_indiceActual] = resultado;
+      _resultados = nuevosResultados;
       _visitados.add(_puntoActual);
     });
 
-    if (_indiceActual >= widget.puntosRuta.length - 1) {
-      await _guardarRutaEnBD();
-      setState(() => _rutaFinalizada = true);
+    final esUltimo = _indiceActual >= widget.puntosRuta.length - 1;
+
+    if (esUltimo) {
+      // ── FIX: guardar UNA sola vez con los resultados ya actualizados ──
+      setState(() => _guardando = true);
+      await _guardarRutaEnBD(nuevosResultados);
+      setState(() {
+        _guardando = false;
+        _rutaFinalizada = true;
+      });
     } else {
       _avanzarSiguiente();
     }
@@ -239,9 +266,15 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
     _mapController.move(coords, 14);
   }
 
+  // ── FIX: finalizar antes del último punto (ruta cortada) ──
   Future<void> _finalizarRuta() async {
-    await _guardarRutaEnBD();
-    setState(() => _rutaFinalizada = true);
+    if (_guardando) return;
+    setState(() => _guardando = true);
+    await _guardarRutaEnBD(_resultados);
+    setState(() {
+      _guardando = false;
+      _rutaFinalizada = true;
+    });
   }
 
   void _mostrarSnack(String msg, {bool error = false}) {
@@ -285,7 +318,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
           GestureDetector(
             onTap: () => _mostrarDialogoSalir(),
             child: Container(
-              width: 34, height: 34,
+              width: 34,
+              height: 34,
               decoration: BoxDecoration(
                 color: Colors.white.withOpacity(0.15),
                 borderRadius: BorderRadius.circular(8),
@@ -304,15 +338,18 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                         fontSize: 16,
                         fontWeight: FontWeight.w600),
                     overflow: TextOverflow.ellipsis),
-                Text('Parada ${_indiceActual + 1} de ${widget.puntosRuta.length}',
-                    style: const TextStyle(color: Color(0xFFA8D5B5), fontSize: 11)),
+                Text(
+                    'Parada ${_indiceActual + 1} de ${widget.puntosRuta.length}',
+                    style:
+                    const TextStyle(color: Color(0xFFA8D5B5), fontSize: 11)),
               ],
             ),
           ),
           GestureDetector(
             onTap: _abrirNavegacion,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              padding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: AppColors.amarillo,
                 borderRadius: BorderRadius.circular(8),
@@ -345,9 +382,13 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
             children: widget.puntosRuta.asMap().entries.map((e) {
               final i = e.key;
               Color color;
-              if (i < _indiceActual) color = AppColors.prioBaja;
-              else if (i == _indiceActual) color = AppColors.amarillo;
-              else color = AppColors.border;
+              if (i < _indiceActual) {
+                color = AppColors.prioBaja;
+              } else if (i == _indiceActual) {
+                color = AppColors.amarillo;
+              } else {
+                color = AppColors.border;
+              }
               return Expanded(
                 child: Container(
                   margin: const EdgeInsets.symmetric(horizontal: 2),
@@ -367,7 +408,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                       fontSize: 10,
                       color: AppColors.prioBaja,
                       fontWeight: FontWeight.w600)),
-              Text('${widget.puntosRuta.length - _indiceActual - 1} pendientes',
+              Text(
+                  '${widget.puntosRuta.length - _indiceActual - 1} pendientes',
                   style: const TextStyle(fontSize: 10, color: AppColors.text3)),
             ],
           ),
@@ -384,10 +426,12 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
         children: [
           FlutterMap(
             mapController: _mapController,
-            options: MapOptions(initialCenter: coordsActual, initialZoom: 13),
+            options:
+            MapOptions(initialCenter: coordsActual, initialZoom: 13),
             children: [
               TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                urlTemplate:
+                'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                 userAgentPackageName: 'com.rutech.app',
               ),
               if (widget.tramosPolyline.isNotEmpty)
@@ -399,21 +443,25 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                       strokeWidth: visitado ? 2 : 4,
                       color: visitado
                           ? Colors.grey.withOpacity(0.4)
-                          : widget.coloresTramos[e.key % widget.coloresTramos.length],
+                          : widget.coloresTramos[
+                      e.key % widget.coloresTramos.length],
                     );
                   }).toList(),
                 ),
               MarkerLayer(
                 markers: [
                   Marker(
-                    point: _oficina, width: 30, height: 30,
+                    point: _oficina,
+                    width: 30,
+                    height: 30,
                     child: Container(
                       decoration: BoxDecoration(
                         color: AppColors.verdeDark,
                         shape: BoxShape.circle,
                         border: Border.all(color: Colors.white, width: 2),
                       ),
-                      child: const Icon(Icons.star, color: AppColors.amarillo, size: 14),
+                      child: const Icon(Icons.star,
+                          color: AppColors.amarillo, size: 14),
                     ),
                   ),
                   ...widget.puntosRuta.asMap().entries.map((e) {
@@ -429,22 +477,31 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                         decoration: BoxDecoration(
                           color: visitado
                               ? AppColors.prioBaja
-                              : esActual ? AppColors.amarillo : AppColors.border,
+                              : esActual
+                              ? AppColors.amarillo
+                              : AppColors.border,
                           shape: BoxShape.circle,
                           border: Border.all(
                               color: Colors.white, width: esActual ? 3 : 2),
                           boxShadow: esActual
-                              ? [BoxShadow(
-                              color: AppColors.amarillo.withOpacity(0.5),
-                              blurRadius: 8, spreadRadius: 2)]
+                              ? [
+                            BoxShadow(
+                                color:
+                                AppColors.amarillo.withOpacity(0.5),
+                                blurRadius: 8,
+                                spreadRadius: 2)
+                          ]
                               : null,
                         ),
                         child: Center(
                           child: visitado
-                              ? const Icon(Icons.check, color: Colors.white, size: 12)
+                              ? const Icon(Icons.check,
+                              color: Colors.white, size: 12)
                               : Text('${i + 1}',
                               style: TextStyle(
-                                  color: esActual ? AppColors.verdeDark : Colors.white,
+                                  color: esActual
+                                      ? AppColors.verdeDark
+                                      : Colors.white,
                                   fontSize: esActual ? 13 : 10,
                                   fontWeight: FontWeight.w700)),
                         ),
@@ -453,7 +510,9 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                   }),
                   if (_miUbicacion != null)
                     Marker(
-                      point: _miUbicacion!, width: 20, height: 20,
+                      point: _miUbicacion!,
+                      width: 20,
+                      height: 20,
                       child: Container(
                         decoration: BoxDecoration(
                           color: const Color(0xFF378ADD),
@@ -461,8 +520,10 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                           border: Border.all(color: Colors.white, width: 2.5),
                           boxShadow: [
                             BoxShadow(
-                                color: const Color(0xFF378ADD).withOpacity(0.4),
-                                blurRadius: 8, spreadRadius: 3)
+                                color:
+                                const Color(0xFF378ADD).withOpacity(0.4),
+                                blurRadius: 8,
+                                spreadRadius: 3)
                           ],
                         ),
                       ),
@@ -472,18 +533,23 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
             ],
           ),
           Positioned(
-            bottom: 10, right: 10,
+            bottom: 10,
+            right: 10,
             child: GestureDetector(
               onTap: () {
-                if (_miUbicacion != null) _mapController.move(_miUbicacion!, 15);
+                if (_miUbicacion != null) {
+                  _mapController.move(_miUbicacion!, 15);
+                }
               },
               child: Container(
-                width: 38, height: 38,
+                width: 38,
+                height: 38,
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(8),
                   boxShadow: [
-                    BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 4)
+                    BoxShadow(
+                        color: Colors.black.withOpacity(0.15), blurRadius: 4)
                   ],
                 ),
                 child: const Icon(Icons.my_location,
@@ -516,7 +582,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                 Row(
                   children: [
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
                         color: _esCaserio
                             ? AppColors.verdeLt
@@ -534,13 +601,16 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                         style: TextStyle(
                             fontSize: 10,
                             fontWeight: FontWeight.w600,
-                            color: _esMoroso ? AppColors.prioAlta : AppColors.verde),
+                            color: _esMoroso
+                                ? AppColors.prioAlta
+                                : AppColors.verde),
                       ),
                     ),
                     if (_esMoroso) ...[
                       const SizedBox(width: 8),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 3),
                         decoration: BoxDecoration(
                             color: const Color(0xFFFFEBEE),
                             borderRadius: BorderRadius.circular(6)),
@@ -556,21 +626,28 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                 if ((_puntoActual['caserio'] ?? '').toString().isNotEmpty ||
                     (_puntoActual['direccion'] ?? '').toString().isNotEmpty) ...[
                   const SizedBox(height: 4),
-                  Text(_puntoActual['caserio'] ?? _puntoActual['direccion'] ?? '',
-                      style: const TextStyle(fontSize: 12, color: AppColors.text2)),
+                  Text(
+                      _puntoActual['caserio'] ??
+                          _puntoActual['direccion'] ??
+                          '',
+                      style: const TextStyle(
+                          fontSize: 12, color: AppColors.text2)),
                 ],
                 if (_puntoActual['tasa'] != null) ...[
                   const SizedBox(height: 4),
                   Row(
                     children: [
-                      Text('Tasa: ${(_puntoActual['tasa'] as num).toStringAsFixed(1)}%',
+                      Text(
+                          'Tasa: ${(_puntoActual['tasa'] as num).toStringAsFixed(1)}%',
                           style: const TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.w600,
                               color: AppColors.verde)),
                       if (_puntoActual['saldo'] != null) ...[
-                        const Text(' · ', style: TextStyle(color: AppColors.text3)),
-                        Text('S/. ${(_puntoActual['saldo'] as num).toStringAsFixed(0)}',
+                        const Text(' · ',
+                            style: TextStyle(color: AppColors.text3)),
+                        Text(
+                            'S/. ${(_puntoActual['saldo'] as num).toStringAsFixed(0)}',
                             style: const TextStyle(
                                 fontSize: 12, color: AppColors.text2)),
                       ],
@@ -613,7 +690,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
             maxLines: 3,
             decoration: InputDecoration(
               hintText: 'Anota lo que observaste en el caserío...',
-              hintStyle: const TextStyle(fontSize: 12, color: AppColors.text3),
+              hintStyle:
+              const TextStyle(fontSize: 12, color: AppColors.text3),
               border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(8),
                   borderSide: const BorderSide(color: AppColors.border)),
@@ -704,7 +782,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                   context: context,
                   initialDate: DateTime.now().add(const Duration(days: 7)),
                   firstDate: DateTime.now(),
-                  lastDate: DateTime.now().add(const Duration(days: 90)),
+                  lastDate:
+                  DateTime.now().add(const Duration(days: 90)),
                   builder: (context, child) => Theme(
                     data: Theme.of(context).copyWith(
                       colorScheme: const ColorScheme.light(
@@ -724,7 +803,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                 }
               },
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 10),
                 decoration: BoxDecoration(
                   border: Border.all(
                       color: _promesaCtrl.text.isNotEmpty
@@ -736,16 +816,19 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                   children: [
                     Icon(Icons.calendar_today,
                         color: _promesaCtrl.text.isNotEmpty
-                            ? AppColors.verde : AppColors.text3,
+                            ? AppColors.verde
+                            : AppColors.text3,
                         size: 16),
                     const SizedBox(width: 8),
                     Text(
                       _promesaCtrl.text.isNotEmpty
-                          ? _promesaCtrl.text : 'Seleccionar fecha',
+                          ? _promesaCtrl.text
+                          : 'Seleccionar fecha',
                       style: TextStyle(
                           fontSize: 13,
                           color: _promesaCtrl.text.isNotEmpty
-                              ? AppColors.verde : AppColors.text3),
+                              ? AppColors.verde
+                              : AppColors.text3),
                     ),
                   ],
                 ),
@@ -761,7 +844,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
             maxLines: 2,
             decoration: InputDecoration(
               hintText: 'Observaciones, acuerdos, próximos pasos...',
-              hintStyle: const TextStyle(fontSize: 12, color: AppColors.text3),
+              hintStyle:
+              const TextStyle(fontSize: 12, color: AppColors.text3),
               border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(8),
                   borderSide: const BorderSide(color: AppColors.border)),
@@ -799,7 +883,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                 style: TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
-                    color: seleccionado ? Colors.white : AppColors.text2)),
+                    color:
+                    seleccionado ? Colors.white : AppColors.text2)),
           ),
         ),
       ),
@@ -817,13 +902,26 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
               backgroundColor: AppColors.amarillo,
               foregroundColor: AppColors.verdeDark,
               padding: const EdgeInsets.symmetric(vertical: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)),
             ),
-            onPressed: _registrarYAvanzar,
-            icon: Icon(esUltimo ? Icons.flag : Icons.arrow_forward, size: 18),
+            // FIX: deshabilitar durante guardado
+            onPressed: _guardando ? null : _registrarYAvanzar,
+            icon: _guardando
+                ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                    color: AppColors.verdeDark, strokeWidth: 2))
+                : Icon(esUltimo ? Icons.flag : Icons.arrow_forward, size: 18),
             label: Text(
-              esUltimo ? 'Registrar y Finalizar Ruta' : 'Registrar y ir al siguiente',
-              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+              _guardando
+                  ? 'Guardando...'
+                  : esUltimo
+                  ? 'Registrar y Finalizar Ruta'
+                  : 'Registrar y ir al siguiente',
+              style: const TextStyle(
+                  fontWeight: FontWeight.w600, fontSize: 14),
             ),
           ),
         ),
@@ -836,11 +934,13 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                 foregroundColor: AppColors.prioAlta,
                 side: const BorderSide(color: AppColors.prioAlta),
                 padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8)),
               ),
-              onPressed: _finalizarRuta,
+              onPressed: _guardando ? null : _finalizarRuta,
               icon: const Icon(Icons.stop_circle_outlined, size: 16),
-              label: const Text('Finalizar ruta aquí', style: TextStyle(fontSize: 13)),
+              label: const Text('Finalizar ruta aquí',
+                  style: TextStyle(fontSize: 13)),
             ),
           ),
         ],
@@ -850,9 +950,12 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
 
   // ── Resumen final ──
   Widget _buildResumenFinal() {
-    final visitados = _resultados.where((r) => r['registrado'] == true).length;
-    final encontrados = _resultados.where((r) => r['encontrado'] == true).length;
-    final interesados = _resultados.where((r) => r['interesado'] == true).length;
+    final visitados =
+        _resultados.where((r) => r['registrado'] == true).length;
+    final encontrados =
+        _resultados.where((r) => r['encontrado'] == true).length;
+    final interesados =
+        _resultados.where((r) => r['interesado'] == true).length;
 
     return Scaffold(
       backgroundColor: AppColors.bg,
@@ -863,7 +966,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
             padding: const EdgeInsets.fromLTRB(16, 48, 16, 20),
             child: Column(
               children: [
-                const Icon(Icons.check_circle, color: AppColors.amarillo, size: 48),
+                const Icon(Icons.check_circle,
+                    color: AppColors.amarillo, size: 48),
                 const SizedBox(height: 8),
                 const Text('¡Ruta completada!',
                     style: TextStyle(
@@ -873,11 +977,13 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                 const SizedBox(height: 4),
                 Text(
                   'Hoy ${DateTime.now().day}/${DateTime.now().month}/${DateTime.now().year}',
-                  style: const TextStyle(color: Color(0xFFA8D5B5), fontSize: 12),
+                  style: const TextStyle(
+                      color: Color(0xFFA8D5B5), fontSize: 12),
                 ),
                 const SizedBox(height: 4),
                 const Text('✓ Ruta guardada en reportes',
-                    style: TextStyle(color: Color(0xFFA8D5B5), fontSize: 11)),
+                    style:
+                    TextStyle(color: Color(0xFFA8D5B5), fontSize: 11)),
               ],
             ),
           ),
@@ -888,9 +994,12 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                 children: [
                   Row(
                     children: [
-                      _statResumen('$visitados', 'Gestionados', AppColors.verde),
-                      _statResumen('$encontrados', 'Encontrados', AppColors.prioBaja),
-                      _statResumen('$interesados', 'Interesados', const Color(0xFF378ADD)),
+                      _statResumen(
+                          '$visitados', 'Gestionados', AppColors.verde),
+                      _statResumen(
+                          '$encontrados', 'Encontrados', AppColors.prioBaja),
+                      _statResumen('$interesados', 'Interesados',
+                          const Color(0xFF378ADD)),
                     ],
                   ),
                   const SizedBox(height: 16),
@@ -908,7 +1017,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.border, width: 0.5),
+                      border:
+                      Border.all(color: AppColors.border, width: 0.5),
                     ),
                     child: Column(
                       children: widget.puntosRuta.asMap().entries.map((e) {
@@ -929,18 +1039,21 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                               CircleAvatar(
                                 radius: 14,
                                 backgroundColor: registrado
-                                    ? AppColors.prioBaja : AppColors.border,
+                                    ? AppColors.prioBaja
+                                    : AppColors.border,
                                 child: registrado
                                     ? const Icon(Icons.check,
                                     color: Colors.white, size: 14)
                                     : Text('${i + 1}',
                                     style: const TextStyle(
-                                        color: Colors.white, fontSize: 10)),
+                                        color: Colors.white,
+                                        fontSize: 10)),
                               ),
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  crossAxisAlignment:
+                                  CrossAxisAlignment.start,
                                   children: [
                                     Text(p['nombre'] ?? '',
                                         style: const TextStyle(
@@ -957,7 +1070,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
                               if (registrado)
                                 Text(r['hora'] ?? '',
                                     style: const TextStyle(
-                                        fontSize: 10, color: AppColors.text3)),
+                                        fontSize: 10,
+                                        color: AppColors.text3)),
                             ],
                           ),
                         );
@@ -1013,9 +1127,12 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
           children: [
             Text(valor,
                 style: TextStyle(
-                    fontSize: 24, fontWeight: FontWeight.w700, color: color)),
+                    fontSize: 24,
+                    fontWeight: FontWeight.w700,
+                    color: color)),
             Text(label,
-                style: const TextStyle(fontSize: 10, color: AppColors.text3)),
+                style: const TextStyle(
+                    fontSize: 10, color: AppColors.text3)),
           ],
         ),
       ),
@@ -1026,7 +1143,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        shape:
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         title: const Text('¿Salir de la ruta?',
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
         content: const Text('Perderás el progreso de la ruta actual.',
@@ -1041,7 +1159,8 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.prioAlta,
               foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)),
             ),
             onPressed: () {
               Navigator.pop(context);

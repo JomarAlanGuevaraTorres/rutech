@@ -555,4 +555,21 @@ class DBHelper {
     ORDER BY v.fecha DESC, v.hora DESC
   ''');
   }
+  static Future<void> limpiarRutasDuplicadas() async {
+    final db = await database;
+    // Conserva solo el registro más reciente de cada (fecha, hora_inicio)
+    await db.execute('''
+    DELETE FROM rutas_ejecutadas
+    WHERE id NOT IN (
+      SELECT MAX(id) FROM rutas_ejecutadas
+      GROUP BY fecha, hora_inicio
+    )
+  ''');
+    // Elimina también visitas huérfanas
+    await db.execute('''
+    DELETE FROM visitas
+    WHERE ruta_id IS NOT NULL
+    AND ruta_id NOT IN (SELECT id FROM rutas_ejecutadas)
+  ''');
+  }
 }
