@@ -9,6 +9,7 @@ import '../database/db_helper.dart';
 import 'mapa_completo_screen.dart';
 import 'mapa_seleccion_screen.dart';
 import 'ejecutar_ruta_screen.dart';
+import 'package:geolocator/geolocator.dart';
 
 class RutaScreen extends StatefulWidget {
   final List<Map<String, dynamic>>? puntosIniciales;
@@ -20,7 +21,10 @@ class RutaScreen extends StatefulWidget {
 
 class _RutaScreenState extends State<RutaScreen> {
   final _buscarController = TextEditingController();
-  final LatLng _oficina = const LatLng(-5.238109, -79.451223);
+  LatLng get _puntoPartida =>
+      (_usarUbicacionActual && _ubicacionActual != null)
+          ? _ubicacionActual!
+          : _puntoPartida;
 
   List<Map<String, dynamic>> _resultadosClientes = [];
   List<Map<String, dynamic>> _resultadosCaserios = [];
@@ -49,6 +53,9 @@ class _RutaScreenState extends State<RutaScreen> {
   bool _calculando = false;
   bool _rutaCalculada = false;
   bool _mostrarCaserios = false;
+  LatLng? _ubicacionActual;
+  bool _usarUbicacionActual = false;
+
 
   @override
   void initState() {
@@ -67,6 +74,16 @@ class _RutaScreenState extends State<RutaScreen> {
   void dispose() {
     _buscarController.dispose();
     super.dispose();
+  }
+
+  Future<void> _obtenerUbicacionActual() async {
+    LocationPermission p = await Geolocator.checkPermission();
+    if (p == LocationPermission.denied) p = await Geolocator.requestPermission();
+    if (p == LocationPermission.denied || p == LocationPermission.deniedForever) return;
+    final pos = await Geolocator.getCurrentPosition(
+      desiredAccuracy: LocationAccuracy.high,
+    );
+    setState(() => _ubicacionActual = LatLng(pos.latitude, pos.longitude));
   }
 
   Future<void> _cargarCaserios() async {
@@ -241,11 +258,11 @@ class _RutaScreenState extends State<RutaScreen> {
 
   double _distanciaRuta(List<Map<String, dynamic>> ruta) {
     if (ruta.isEmpty) return 0;
-    double total = _distancia(_oficina, _coordsPunto(ruta.first));
+    double total = _distancia(_puntoPartida, _coordsPunto(ruta.first));
     for (int i = 0; i < ruta.length - 1; i++) {
       total += _distancia(_coordsPunto(ruta[i]), _coordsPunto(ruta[i + 1]));
     }
-    total += _distancia(_coordsPunto(ruta.last), _oficina);
+    total += _distancia(_coordsPunto(ruta.last), _puntoPartida);
     return total;
   }
 
@@ -254,7 +271,7 @@ class _RutaScreenState extends State<RutaScreen> {
       List<Map<String, dynamic>> clientes) {
     final noVisitados = List<Map<String, dynamic>>.from(clientes);
     final ruta = <Map<String, dynamic>>[];
-    LatLng actual = _oficina;
+    LatLng actual = _puntoPartida;
     while (noVisitados.isNotEmpty) {
       double menorDist = double.infinity;
       int indice = 0;
@@ -280,11 +297,11 @@ class _RutaScreenState extends State<RutaScreen> {
       mejoro = false;
       for (int i = 0; i < mejor.length - 1; i++) {
         for (int j = i + 2; j < mejor.length; j++) {
-          final a = i == 0 ? _oficina : _coordsPunto(mejor[i - 1]);
+          final a = i == 0 ? _puntoPartida : _coordsPunto(mejor[i - 1]);
           final b = _coordsPunto(mejor[i]);
           final c = _coordsPunto(mejor[j]);
           final d = j == mejor.length - 1
-              ? _oficina
+              ? _puntoPartida
               : _coordsPunto(mejor[j + 1]);
           if (_distancia(a, c) + _distancia(b, d) <
               _distancia(a, b) + _distancia(c, d) - 1.0) {
@@ -465,7 +482,7 @@ class _RutaScreenState extends State<RutaScreen> {
     });
 
     // GraphHopper tramo por tramo
-    final secuencia = [_oficina, ...resultado.map(_coordsPunto), _oficina];
+    final secuencia = [_puntoPartida, ...resultado.map(_coordsPunto), _puntoPartida];
     final List<List<LatLng>> tramosCalculados = [];
 
     for (int i = 0; i < secuencia.length - 1; i++) {
@@ -500,7 +517,7 @@ class _RutaScreenState extends State<RutaScreen> {
   List<Marker> _buildMarkers() {
     return [
       Marker(
-        point: _oficina,
+        point: _puntoPartida,
         width: 36,
         height: 36,
         child: Container(
@@ -554,7 +571,7 @@ class _RutaScreenState extends State<RutaScreen> {
       context,
       MaterialPageRoute(
         builder: (_) => MapaCompletoScreen(
-          centro: _oficina,
+          centro: _puntoPartida,
           zoom: 12,
           markers: _buildMarkers(),
           polylines: _buildPolylines(),
@@ -568,12 +585,12 @@ class _RutaScreenState extends State<RutaScreen> {
   double _distanciaTotal() {
     if (_puntosRuta.isEmpty) return 0;
     double total =
-    _distancia(_oficina, _coordsPunto(_puntosRuta.first));
+    _distancia(_puntoPartida, _coordsPunto(_puntosRuta.first));
     for (int i = 0; i < _puntosRuta.length - 1; i++) {
       total += _distancia(
           _coordsPunto(_puntosRuta[i]), _coordsPunto(_puntosRuta[i + 1]));
     }
-    total += _distancia(_coordsPunto(_puntosRuta.last), _oficina);
+    total += _distancia(_coordsPunto(_puntosRuta.last), _puntoPartida);
     return total / 1000;
   }
 
@@ -1002,6 +1019,12 @@ class _RutaScreenState extends State<RutaScreen> {
 
           const SizedBox(height: 16),
 
+          const SizedBox(height: 16),
+
+          // ── Selector punto de partida ──
+          _buildSelectorPartida(),
+          const SizedBox(height: 12),
+
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
@@ -1012,8 +1035,7 @@ class _RutaScreenState extends State<RutaScreen> {
                 shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(8)),
               ),
-              onPressed:
-              _puntosRuta.isEmpty || _calculando ? null : _calcularRuta,
+              onPressed: _puntosRuta.isEmpty || _calculando ? null : _calcularRuta,
               icon: _calculando
                   ? const SizedBox(
                   width: 16,
@@ -1026,6 +1048,7 @@ class _RutaScreenState extends State<RutaScreen> {
                   : 'Calcular Mejor Ruta'),
             ),
           ),
+          const SizedBox(height: 20),
           const SizedBox(height: 20),
         ],
       ),
@@ -1117,7 +1140,7 @@ class _RutaScreenState extends State<RutaScreen> {
             children: [
               FlutterMap(
                 options: MapOptions(
-                  initialCenter: _oficina,
+                  initialCenter: _puntoPartida,
                   initialZoom: 12,
                 ),
                 children: [
@@ -1187,7 +1210,7 @@ class _RutaScreenState extends State<RutaScreen> {
                         final i = e.key;
                         final p = e.value;
                         final anterior = i == 0
-                            ? _oficina
+                            ? _puntoPartida
                             : _coordsPunto(_puntosRuta[i - 1]);
                         final actual = _coordsPunto(p);
                         final distM = _distancia(anterior, actual);
@@ -1198,7 +1221,7 @@ class _RutaScreenState extends State<RutaScreen> {
                         int minsAcum = 0;
                         for (int k = 0; k <= i; k++) {
                           final ant2 = k == 0
-                              ? _oficina
+                              ? _puntoPartida
                               : _coordsPunto(_puntosRuta[k - 1]);
                           final act2 = _coordsPunto(_puntosRuta[k]);
                           final d = _distancia(ant2, act2) / 1000;
@@ -1326,4 +1349,89 @@ class _RutaScreenState extends State<RutaScreen> {
       ),
     );
   }
+  Widget _buildSelectorPartida() {
+    return Column(
+      children: [
+        Row(children: [
+          Expanded(
+            child: GestureDetector(
+              onTap: () => setState(() => _usarUbicacionActual = false),
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: !_usarUbicacionActual ? AppColors.verdeLt : Colors.white,
+                  border: Border.all(
+                    color: !_usarUbicacionActual ? AppColors.verde : AppColors.border,
+                    width: !_usarUbicacionActual ? 2 : 1,
+                  ),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Column(children: [
+                  Icon(Icons.business, color: AppColors.verde, size: 22),
+                  SizedBox(height: 4),
+                  Text('Oficina', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.verde)),
+                  Text('Salida fija', style: TextStyle(fontSize: 10, color: AppColors.text3)),
+                ]),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: GestureDetector(
+              onTap: () async {
+                setState(() => _usarUbicacionActual = true);
+                await _obtenerUbicacionActual();
+                if (_ubicacionActual == null) {
+                  _mostrarSnack('No se pudo obtener el GPS', error: true);
+                  setState(() => _usarUbicacionActual = false);
+                }
+              },
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: _usarUbicacionActual ? const Color(0xFFE6F1FB) : Colors.white,
+                  border: Border.all(
+                    color: _usarUbicacionActual ? const Color(0xFF378ADD) : AppColors.border,
+                    width: _usarUbicacionActual ? 2 : 1,
+                  ),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(children: [
+                  Icon(Icons.my_location,
+                      color: _usarUbicacionActual ? const Color(0xFF378ADD) : AppColors.text3,
+                      size: 22),
+                  const SizedBox(height: 4),
+                  Text('Mi ubicación',
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: _usarUbicacionActual ? const Color(0xFF378ADD) : AppColors.text2)),
+                  const Text('GPS actual',
+                      style: TextStyle(fontSize: 10, color: AppColors.text3)),
+                ]),
+              ),
+            ),
+          ),
+        ]),
+        if (_usarUbicacionActual && _ubicacionActual != null)
+          Container(
+            margin: const EdgeInsets.only(top: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFE6F1FB),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(children: [
+              const Icon(Icons.location_on, color: Color(0xFF378ADD), size: 14),
+              const SizedBox(width: 6),
+              Text(
+                '${_ubicacionActual!.latitude.toStringAsFixed(5)}, ${_ubicacionActual!.longitude.toStringAsFixed(5)}',
+                style: const TextStyle(fontSize: 11, color: Color(0xFF185FA5)),
+              ),
+            ]),
+          ),
+      ],
+    );
+  }
+
 }
