@@ -202,6 +202,7 @@ class _EjecutarRutaScreenState extends State<EjecutarRutaScreen> {
         'ruta_id': rutaId,
       });
     }
+    await DBHelper.sincronizarSeguimientos(rutaId);
   }
 
   // ── FIX: registrar último punto y mostrar resumen SIN llamar _finalizarRuta ──

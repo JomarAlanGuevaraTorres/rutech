@@ -15,9 +15,9 @@ class DBHelper {
     final path = join(await getDatabasesPath(), 'rutech.db');
     return await openDatabase(
       path,
-      version: 2,           // ← subimos a versión 2
+      version: 3,           // ← subimos a versión 3
       onCreate: _crearTablas,
-      onUpgrade: _migrarV2, // ← migración automática
+      onUpgrade: _migrar,
     );
   }
 
@@ -27,17 +27,14 @@ class DBHelper {
     _db = null;
   }
 
-  // ── Migración v1 → v2 ────────────────────────────────
-  static Future<void> _migrarV2(Database db, int oldV, int newV) async {
+  // ── Migración ────────────────────────────────────────
+  static Future<void> _migrar(Database db, int oldV, int newV) async {
     if (oldV < 2) {
-      // Agregar ruta_id a visitas si no existe
       final cols = await db.rawQuery('PRAGMA table_info(visitas)');
       final nombres = cols.map((c) => c['name'].toString()).toSet();
       if (!nombres.contains('ruta_id')) {
         await db.execute('ALTER TABLE visitas ADD COLUMN ruta_id INTEGER');
       }
-
-      // Crear tabla rutas_ejecutadas si no existe
       await db.execute('''
         CREATE TABLE IF NOT EXISTS rutas_ejecutadas (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +48,41 @@ class DBHelper {
           distancia_km REAL,
           notas TEXT
         )
+      ''');
+    }
+    if (oldV < 3) {
+      // Tabla de seguimiento de interesados
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS seguimientos (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          visita_id INTEGER NOT NULL,
+          ruta_id INTEGER,
+          cliente_id INTEGER,
+          nombre TEXT NOT NULL,
+          fecha_visita TEXT,
+          hora_visita TEXT,
+          notas_visita TEXT,
+          estado TEXT DEFAULT 'pendiente',
+          fecha_cobro TEXT,
+          monto_cobro REAL,
+          notas_seguimiento TEXT,
+          creado_en TEXT NOT NULL
+        )
+      ''');
+
+      // Limpiar rutas duplicadas que pudo haber generado el bug anterior
+      await db.execute('''
+        DELETE FROM rutas_ejecutadas
+        WHERE id NOT IN (
+          SELECT MAX(id) FROM rutas_ejecutadas
+          GROUP BY fecha, hora_inicio
+        )
+      ''');
+      // Limpiar visitas huérfanas
+      await db.execute('''
+        DELETE FROM visitas
+        WHERE ruta_id IS NOT NULL
+        AND ruta_id NOT IN (SELECT id FROM rutas_ejecutadas)
       ''');
     }
   }
@@ -119,7 +151,6 @@ class DBHelper {
       )
     ''');
 
-    // ← NUEVA tabla de rutas ejecutadas
     await db.execute('''
       CREATE TABLE rutas_ejecutadas (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,6 +176,25 @@ class DBHelper {
         hora_inicio TEXT,
         hora_fin TEXT,
         estado TEXT DEFAULT 'pendiente'
+      )
+    ''');
+
+    // ── NUEVA tabla de seguimientos ──
+    await db.execute('''
+      CREATE TABLE seguimientos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        visita_id INTEGER NOT NULL,
+        ruta_id INTEGER,
+        cliente_id INTEGER,
+        nombre TEXT NOT NULL,
+        fecha_visita TEXT,
+        hora_visita TEXT,
+        notas_visita TEXT,
+        estado TEXT DEFAULT 'pendiente',
+        fecha_cobro TEXT,
+        monto_cobro REAL,
+        notas_seguimiento TEXT,
+        creado_en TEXT NOT NULL
       )
     ''');
 
@@ -408,7 +458,6 @@ class DBHelper {
 
   // ─── RUTAS EJECUTADAS ────────────────────────────────
 
-  /// Guarda el encabezado de una ruta ejecutada y retorna su id.
   static Future<int> insertRutaEjecutada({
     required String fecha,
     required String horaInicio,
@@ -432,14 +481,12 @@ class DBHelper {
     });
   }
 
-  /// Lista de rutas ejecutadas ordenadas por fecha desc.
   static Future<List<Map<String, dynamic>>> getRutasEjecutadas() async {
     final db = await database;
     return await db.query('rutas_ejecutadas',
         orderBy: 'fecha DESC, hora_inicio DESC');
   }
 
-  /// Visitas de una ruta específica con nombre del cliente.
   static Future<List<Map<String, dynamic>>> getVisitasDeLaRuta(
       int rutaId) async {
     final db = await database;
@@ -456,20 +503,18 @@ class DBHelper {
     ''', [rutaId]);
   }
 
-  /// Elimina una ruta y todas sus visitas.
   static Future<void> eliminarRuta(int rutaId) async {
     final db = await database;
     await db.delete('visitas', where: 'ruta_id = ?', whereArgs: [rutaId]);
+    await db.delete('seguimientos', where: 'ruta_id = ?', whereArgs: [rutaId]);
     await db.delete('rutas_ejecutadas', where: 'id = ?', whereArgs: [rutaId]);
   }
 
-  /// Elimina una visita individual.
   static Future<void> eliminarVisita(int id) async {
     final db = await database;
     await db.delete('visitas', where: 'id = ?', whereArgs: [id]);
   }
 
-  /// Actualiza resultado de una visita.
   static Future<void> actualizarVisita({
     required int id,
     required int encontrado,
@@ -489,7 +534,6 @@ class DBHelper {
     );
   }
 
-  /// Todas las visitas (para estadísticas globales).
   static Future<List<Map<String, dynamic>>> getTodasLasVisitas() async {
     final db = await database;
     return await db.rawQuery('''
@@ -502,6 +546,120 @@ class DBHelper {
       LEFT JOIN tacticos t ON v.cliente_id = t.id
       ORDER BY v.fecha DESC, v.hora DESC
     ''');
+  }
+
+  // ─── SEGUIMIENTOS ────────────────────────────────────
+
+  /// Crea un seguimiento a partir de una visita con interesado=1.
+  /// Se llama automáticamente al guardar la ruta.
+  static Future<void> sincronizarSeguimientos(int rutaId) async {
+    final db = await database;
+    final visitas = await db.rawQuery('''
+      SELECT v.*,
+             COALESCE(c.nombre, t.nombre) AS nombre_cliente,
+             c.id AS cid, t.id AS tid
+      FROM visitas v
+      LEFT JOIN clientes c ON v.cliente_id = c.id
+      LEFT JOIN tacticos t ON v.cliente_id = t.id
+      WHERE v.ruta_id = ? AND v.interesado = 1
+    ''', [rutaId]);
+
+    final ahora = DateTime.now().toIso8601String().substring(0, 10);
+
+    for (final v in visitas) {
+      // Evitar duplicados: si ya existe seguimiento para esta visita, saltar
+      final existe = await db.query('seguimientos',
+          where: 'visita_id = ?', whereArgs: [v['id']]);
+      if (existe.isNotEmpty) continue;
+
+      // Extraer nombre desde resultado si no hay cliente_id
+      String nombre = (v['nombre_cliente'] as String?) ?? '';
+      if (nombre.isEmpty) {
+        // El nombre se guarda en resultado como "Punto: <nombre>"
+        final resultado = (v['resultado'] as String?) ?? '';
+        final match = RegExp(r'Punto: (.+?)(\s*\||\s*$)').firstMatch(resultado);
+        if (match != null) nombre = match.group(1) ?? 'Sin nombre';
+      }
+      if (nombre.isEmpty) nombre = 'Sin nombre';
+
+      await db.insert('seguimientos', {
+        'visita_id': v['id'],
+        'ruta_id': rutaId,
+        'cliente_id': v['cliente_id'],
+        'nombre': nombre,
+        'fecha_visita': v['fecha'],
+        'hora_visita': v['hora'],
+        'notas_visita': v['resultado'],
+        'estado': 'pendiente',
+        'creado_en': ahora,
+      });
+    }
+  }
+
+  /// Lista de seguimientos pendientes (interesados no cobrados).
+  static Future<List<Map<String, dynamic>>> getSeguimientosPendientes() async {
+    final db = await database;
+    return await db.query(
+      'seguimientos',
+      where: "estado = 'pendiente'",
+      orderBy: 'creado_en DESC',
+    );
+  }
+
+  /// Lista de seguimientos cobrados/cerrados.
+  static Future<List<Map<String, dynamic>>> getSeguimientosCobrados() async {
+    final db = await database;
+    return await db.query(
+      'seguimientos',
+      where: "estado = 'cobrado'",
+      orderBy: 'fecha_cobro DESC',
+    );
+  }
+
+  /// Marcar como cobrado.
+  static Future<void> marcarCobrado({
+    required int id,
+    required String fechaCobro,
+    double? montoCobro,
+    String? notas,
+  }) async {
+    final db = await database;
+    await db.update(
+      'seguimientos',
+      {
+        'estado': 'cobrado',
+        'fecha_cobro': fechaCobro,
+        'monto_cobro': montoCobro,
+        'notas_seguimiento': notas,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// Actualizar notas de seguimiento sin cambiar estado.
+  static Future<void> actualizarNotasSeguimiento({
+    required int id,
+    required String notas,
+  }) async {
+    final db = await database;
+    await db.update(
+      'seguimientos',
+      {'notas_seguimiento': notas},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  /// Descartar/archivar un seguimiento (no se convirtió).
+  static Future<void> descartarSeguimiento(int id) async {
+    final db = await database;
+    await db.update(
+      'seguimientos',
+      {'estado': 'descartado'},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   // ─── TACTICOS ────────────────────────────────────────
@@ -553,23 +711,6 @@ class DBHelper {
     FROM visitas v
     LEFT JOIN clientes c ON v.cliente_id = c.id
     ORDER BY v.fecha DESC, v.hora DESC
-  ''');
-  }
-  static Future<void> limpiarRutasDuplicadas() async {
-    final db = await database;
-    // Conserva solo el registro más reciente de cada (fecha, hora_inicio)
-    await db.execute('''
-    DELETE FROM rutas_ejecutadas
-    WHERE id NOT IN (
-      SELECT MAX(id) FROM rutas_ejecutadas
-      GROUP BY fecha, hora_inicio
-    )
-  ''');
-    // Elimina también visitas huérfanas
-    await db.execute('''
-    DELETE FROM visitas
-    WHERE ruta_id IS NOT NULL
-    AND ruta_id NOT IN (SELECT id FROM rutas_ejecutadas)
   ''');
   }
 }
