@@ -21,10 +21,11 @@ class RutaScreen extends StatefulWidget {
 
 class _RutaScreenState extends State<RutaScreen> {
   final _buscarController = TextEditingController();
+  final LatLng _oficina = const LatLng(-5.238109, -79.451223);
   LatLng get _puntoPartida =>
       (_usarUbicacionActual && _ubicacionActual != null)
           ? _ubicacionActual!
-          : _puntoPartida;
+          : _oficina;
 
   List<Map<String, dynamic>> _resultadosClientes = [];
   List<Map<String, dynamic>> _resultadosCaserios = [];
@@ -475,33 +476,34 @@ class _RutaScreenState extends State<RutaScreen> {
       _tramosPolyline = [];
     });
 
-    // GA + 2-opt
     final resultado = await Future(() {
       final rutaGA = _algoritmoGenetico(_puntosRuta);
       return _dosOpt(rutaGA);
     });
 
-    // GraphHopper tramo por tramo
-    final secuencia = [_puntoPartida, ...resultado.map(_coordsPunto), _puntoPartida];
-    final List<List<LatLng>> tramosCalculados = [];
+    final secuencia = [
+      _puntoPartida,
+      ...resultado.map(_coordsPunto),
+      _puntoPartida,
+    ];
 
-    for (int i = 0; i < secuencia.length - 1; i++) {
-      List<LatLng> tramo = [];
-      int intentos = 0;
-      while (intentos < 3) {
-        tramo = await _obtenerTramoOSRM(secuencia[i], secuencia[i + 1]);
-        if (tramo.length > 2) break;
-        intentos++;
-        if (intentos < 3) {
-          await Future.delayed(const Duration(seconds: 3));
-        }
+    final tramosCalculados = <List<LatLng>>[];
+
+    // Lotes de 5 en paralelo
+    const lote = 5;
+    for (int i = 0; i < secuencia.length - 1; i += lote) {
+      final fin = (i + lote).clamp(0, secuencia.length - 1);
+      final grupo = <Future<List<LatLng>>>[];
+      for (int j = i; j < fin; j++) {
+        grupo.add(_obtenerTramoOSRM(secuencia[j], secuencia[j + 1]));
       }
-      if (tramo.length <= 2) {
-        tramo = _suavizarRuta([secuencia[i], secuencia[i + 1]]);
-      }
-      tramosCalculados.add(tramo);
-      if (i < secuencia.length - 2) {
-        await Future.delayed(const Duration(milliseconds: 1500));
+      final resultados = await Future.wait(grupo);
+      tramosCalculados.addAll(resultados.map((t) =>
+      t.length <= 2 ? _suavizarRuta(t) : t));
+
+      // Pequeña pausa entre lotes para no saturar
+      if (fin < secuencia.length - 1) {
+        await Future.delayed(const Duration(milliseconds: 300));
       }
     }
 
@@ -1044,7 +1046,7 @@ class _RutaScreenState extends State<RutaScreen> {
                       color: AppColors.verdeDark, strokeWidth: 2))
                   : const Icon(Icons.calculate),
               label: Text(_calculando
-                  ? 'Calculando... (~${_puntosRuta.length * 2}s)'
+                  ? 'Calculando... (~${_puntosRuta.length }s)'
                   : 'Calcular Mejor Ruta'),
             ),
           ),
