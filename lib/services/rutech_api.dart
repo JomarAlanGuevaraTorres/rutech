@@ -18,6 +18,22 @@ class RutechApi {
     return (jsonDecode(response.body) as List).cast<Map<String, dynamic>>();
   }
 
+  Future<List<Map<String, dynamic>>> clientes({
+    String? agencia,
+    String? prioridad,
+  }) async {
+    final params = <String, String>{
+      if (agencia != null) 'agencia': agencia,
+      if (prioridad != null) 'prioridad': prioridad,
+    };
+    final uri = Uri.parse(
+      '$baseUrl/clientes',
+    ).replace(queryParameters: params.isEmpty ? null : params);
+    final response = await http.get(uri).timeout(const Duration(seconds: 30));
+    _validate(response);
+    return (jsonDecode(response.body) as List).cast<Map<String, dynamic>>();
+  }
+
   Future<Map<String, dynamic>> planificar({
     required String agencia,
     int maxVisitas = 15,

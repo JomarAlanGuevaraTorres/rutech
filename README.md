@@ -21,3 +21,14 @@ En el emulador Android, `10.0.2.2` representa la computadora. En un celular fís
 ## Alcance del prototipo
 
 La distancia se estima con Haversine y una velocidad urbana configurable. Esta versión permite validar la lógica sin exponer información de clientes. Antes de un uso real se debe reemplazar la matriz estimada por tiempos viales de OSRM, aplicar autenticación y cifrar la información.
+
+## Flujo funcional móvil
+
+1. En **Inicio**, seleccione la agencia de salida y retorno. El tablero muestra la cantidad de clientes P1, P2, P3 y P4 asignados a esa agencia.
+2. Ajuste el máximo de visitas y pulse **Generar ruta priorizada**. El servidor ordena primero por prioridad y luego resuelve el VRPTW.
+3. En **Clientes**, consulte la base asignada y filtre por nivel de prioridad.
+4. En **Mapa**, visualice la agencia y todos sus clientes, diferenciados por color de prioridad.
+5. En **Ruta**, revise el recorrido, la secuencia, distancia y ventanas horarias. Pulse **Iniciar** para atender cada parada.
+6. Durante la ejecución puede abrir la navegación GPS y registrar la visita como realizada, no ubicada o reprogramada.
+
+El APK generado queda en `build/app/outputs/flutter-apk/app-release.apk`.

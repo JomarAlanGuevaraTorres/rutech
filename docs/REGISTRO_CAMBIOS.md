@@ -24,3 +24,11 @@ Validaciones ejecutadas:
 - Prueba Flutter aprobada.
 - API `/salud` y `/planificar` aprobada.
 - APK Android de depuración construido correctamente.
+# Versión móvil integrada (septiembre de 2026)
+
+- Se unificó la aplicación con la base sintética de 200 clientes y las agencias de Piura.
+- Se reemplazaron los campos del prototipo anterior por prioridad, puntaje, tipo de gestión y ventanas horarias.
+- Se agregó selección de agencia, resumen P1-P4, listado filtrable y mapa de clientes.
+- La ruta VRPTW ahora se muestra en el mapa con su orden, horario, distancia y retorno a la agencia.
+- Se incorporó el inicio de jornada, navegación GPS y registro del resultado de cada visita.
+
