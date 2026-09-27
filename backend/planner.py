@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import pandas as pd
+import httpx
 
 
 PRIORITY_ORDER = {"P1": 1, "P2": 2, "P3": 3, "P4": 4}
@@ -98,6 +99,60 @@ def _travel_minutes(a: tuple[float, float], b: tuple[float, float], speed_kmh: f
     return max(1, round((haversine_km(a, b) / speed_kmh) * 60))
 
 
+OSRM_BASE_URL = "https://router.project-osrm.org"
+
+
+def _osrm_coordinates(points: list[tuple[float, float]]) -> str:
+    """OSRM recibe longitud,latitud aunque internamente usemos latitud,longitud."""
+    return ";".join(f"{longitude:.6f},{latitude:.6f}" for latitude, longitude in points)
+
+
+def road_time_matrix(points: list[tuple[float, float]]) -> list[list[int]]:
+    """Obtiene minutos de conducción por las calles reales para cada par de puntos."""
+    url = f"{OSRM_BASE_URL}/table/v1/driving/{_osrm_coordinates(points)}"
+    response = httpx.get(
+        url,
+        params={"annotations": "duration"},
+        headers={"User-Agent": "RUTECH-academic-prototype/2.1"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("code") != "Ok" or not payload.get("durations"):
+        raise ValueError(f"OSRM no pudo calcular la matriz vial: {payload.get('message', 'sin detalle')}")
+    matrix: list[list[int]] = []
+    for row in payload["durations"]:
+        if any(value is None for value in row):
+            raise ValueError("OSRM no encontró conexión vial entre todos los puntos")
+        matrix.append([max(0, round(float(value) / 60)) for value in row])
+    return matrix
+
+
+def road_route(points: list[tuple[float, float]]) -> dict[str, Any]:
+    """Devuelve la polilínea GeoJSON que sigue calles, además de distancia y duración."""
+    url = f"{OSRM_BASE_URL}/route/v1/driving/{_osrm_coordinates(points)}"
+    response = httpx.get(
+        url,
+        params={"overview": "full", "geometries": "geojson", "steps": "false"},
+        headers={"User-Agent": "RUTECH-academic-prototype/2.1"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("code") != "Ok" or not payload.get("routes"):
+        raise ValueError(f"OSRM no pudo construir la ruta vial: {payload.get('message', 'sin detalle')}")
+    route = payload["routes"][0]
+    geometry = [
+        {"latitud": float(latitude), "longitud": float(longitude)}
+        for longitude, latitude in route["geometry"]["coordinates"]
+    ]
+    return {
+        "geometria_ruta": geometry,
+        "distancia_vial_km": round(float(route["distance"]) / 1000, 2),
+        "duracion_vial_min": round(float(route["duration"]) / 60),
+    }
+
+
 def select_candidates(clients: Iterable[dict[str, Any]], agency_code: str, max_visits: int) -> list[dict[str, Any]]:
     selected = [row for row in clients if row.get("Codigo_agencia") == agency_code]
     selected.sort(key=lambda row: (PRIORITY_ORDER.get(str(row.get("Prioridad")), 9), -int(row.get("Puntaje_prioridad") or 0), int(row.get("Hora_hasta") or 1440)))
@@ -156,7 +211,13 @@ def _greedy_vrptw(clients: list[dict[str, Any]], depot: tuple[float, float], sta
     return route, omitted
 
 
-def _ortools_vrptw(clients: list[dict[str, Any]], depot: tuple[float, float], start: int, end: int) -> tuple[list[Stop], list[str]] | None:
+def _ortools_vrptw(
+    clients: list[dict[str, Any]],
+    depot: tuple[float, float],
+    start: int,
+    end: int,
+    travel_matrix: list[list[int]] | None = None,
+) -> tuple[list[Stop], list[str]] | None:
     """Resuelve el VRPTW; devuelve None cuando OR-Tools no está instalado."""
     try:
         from ortools.constraint_solver import pywrapcp, routing_enums_pb2
@@ -169,7 +230,8 @@ def _ortools_vrptw(clients: list[dict[str, Any]], depot: tuple[float, float], st
     def transit(from_index: int, to_index: int) -> int:
         origin, destination = manager.IndexToNode(from_index), manager.IndexToNode(to_index)
         service = 0 if origin == 0 else int(clients[origin - 1].get("Duracion_visita_min") or 30)
-        return service + _travel_minutes(points[origin], points[destination])
+        travel = travel_matrix[origin][destination] if travel_matrix else _travel_minutes(points[origin], points[destination])
+        return service + travel
 
     callback = routing.RegisterTransitCallback(transit)
     routing.SetArcCostEvaluatorOfAllVehicles(callback)
@@ -203,7 +265,7 @@ def _ortools_vrptw(clients: list[dict[str, Any]], depot: tuple[float, float], st
         node = manager.IndexToNode(next_index)
         row = clients[node - 1]
         arrival = solution.Value(dimension.CumulVar(next_index))
-        travel = _travel_minutes(points[previous_node], points[node])
+        travel = travel_matrix[previous_node][node] if travel_matrix else _travel_minutes(points[previous_node], points[node])
         departure = arrival + int(row.get("Duracion_visita_min") or 30)
         route.append(Stop(row, arrival, departure, travel))
         visited.add(node)
@@ -213,13 +275,29 @@ def _ortools_vrptw(clients: list[dict[str, Any]], depot: tuple[float, float], st
     return route, omitted
 
 
-def build_plan(clients: list[dict[str, Any]], agencies: list[dict[str, Any]], agency_code: str, max_visits: int = 15, start: int = 8 * 60, end: int = 18 * 60) -> dict[str, Any]:
+def build_plan(
+    clients: list[dict[str, Any]],
+    agencies: list[dict[str, Any]],
+    agency_code: str,
+    max_visits: int = 15,
+    start: int = 8 * 60,
+    end: int = 18 * 60,
+    use_road_network: bool = False,
+) -> dict[str, Any]:
     agency = next((row for row in agencies if row.get("Codigo") == agency_code), None)
     if agency is None:
         raise ValueError(f"Agencia desconocida: {agency_code}")
     candidates = select_candidates(clients, agency_code, max_visits)
     depot = (float(agency["Latitud"]), float(agency["Longitud"]))
-    optimized = _ortools_vrptw(candidates, depot, start, end)
+    candidate_points = [depot] + [(float(row["Latitud"]), float(row["Longitud"])) for row in candidates]
+    travel_matrix = None
+    road_warning = None
+    if use_road_network:
+        try:
+            travel_matrix = road_time_matrix(candidate_points)
+        except (httpx.HTTPError, ValueError) as exc:
+            road_warning = f"No se pudo consultar la red vial; se usó estimación temporal: {exc}"
+    optimized = _ortools_vrptw(candidates, depot, start, end, travel_matrix)
     stops, omitted = optimized if optimized is not None else _greedy_vrptw(candidates, depot, start, end)
     distance = 0.0
     previous = depot
@@ -231,7 +309,7 @@ def build_plan(clients: list[dict[str, Any]], agencies: list[dict[str, Any]], ag
         payload.append({**stop.client, "Orden": sequence, "Llegada_min": stop.arrival, "Salida_min": stop.departure, "Traslado_min": stop.travel_minutes})
     if stops:
         distance += haversine_km(previous, depot)
-    return {
+    result = {
         "metodo": "VRPTW con OR-Tools" if optimized is not None else "VRPTW heurístico con prioridad lexicográfica",
         "agencia": agency,
         "visitas": payload,
@@ -239,7 +317,22 @@ def build_plan(clients: list[dict[str, Any]], agencies: list[dict[str, Any]], ag
         "distancia_estimada_km": round(distance, 2),
         "inicio_min": start,
         "fin_min": stops[-1].departure if stops else start,
+        "red_vial": False,
     }
+    if stops and use_road_network:
+        ordered_points = [depot] + [
+            (float(stop.client["Latitud"]), float(stop.client["Longitud"])) for stop in stops
+        ] + [depot]
+        try:
+            road_data = road_route(ordered_points)
+            result.update(road_data)
+            result["distancia_estimada_km"] = road_data["distancia_vial_km"]
+            result["red_vial"] = True
+        except (httpx.HTTPError, ValueError) as exc:
+            road_warning = f"No se pudo obtener la geometría vial; se muestran segmentos directos: {exc}"
+    if road_warning:
+        result["aviso_ruteo"] = road_warning
+    return result
 
 
 def build_multi_plan(clients: list[dict[str, Any]], agencies: list[dict[str, Any]], agency_code: str, advisors: int, max_visits: int = 15, start: int = 8 * 60, end: int = 18 * 60) -> dict[str, Any]:
@@ -249,7 +342,7 @@ def build_multi_plan(clients: list[dict[str, Any]], agencies: list[dict[str, Any
     candidates = select_candidates(clients, agency_code, max_visits * advisors)
     routes = []
     for number, group in enumerate(assign_clusters(candidates, advisors), start=1):
-        plan = build_plan(group, agencies, agency_code, len(group), start, end)
+        plan = build_plan(group, agencies, agency_code, len(group), start, end, use_road_network=True)
         plan["asesor"] = number
         routes.append(plan)
     return {"agencia": agency, "asesores": len(routes), "rutas": routes, "criterio_agrupacion": "K-means++ después de priorizar"}

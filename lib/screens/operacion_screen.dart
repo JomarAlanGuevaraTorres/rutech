@@ -440,7 +440,23 @@ class _OperacionScreenState extends State<OperacionScreen> {
         ),
       ),
     ];
-    final points = <LatLng>[center, ...items.map(_coords), if (route) center];
+    final directPoints = <LatLng>[
+      center,
+      ...items.map(_coords),
+      if (route) center,
+    ];
+    final roadGeometry = ((_plan?['geometria_ruta'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>();
+    final routePoints = roadGeometry.isNotEmpty
+        ? roadGeometry
+              .map(
+                (point) => LatLng(
+                  (point['latitud'] as num).toDouble(),
+                  (point['longitud'] as num).toDouble(),
+                ),
+              )
+              .toList()
+        : directPoints;
     return FlutterMap(
       options: MapOptions(
         initialCenter: center,
@@ -451,10 +467,14 @@ class _OperacionScreenState extends State<OperacionScreen> {
           urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
           userAgentPackageName: 'com.example.rutech',
         ),
-        if (route && points.length > 2)
+        if (route && routePoints.length > 2)
           PolylineLayer(
             polylines: [
-              Polyline(points: points, strokeWidth: 5, color: AppColors.verde),
+              Polyline(
+                points: routePoints,
+                strokeWidth: 5,
+                color: AppColors.verde,
+              ),
             ],
           ),
         MarkerLayer(markers: markers),
@@ -506,9 +526,31 @@ class _OperacionScreenState extends State<OperacionScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      '${_plan!['metodo']}',
-                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '${_plan!['metodo']}',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                        Icon(
+                          _plan!['red_vial'] == true
+                              ? Icons.alt_route
+                              : Icons.straighten,
+                          size: 17,
+                          color: _plan!['red_vial'] == true
+                              ? AppColors.verde
+                              : Colors.orange,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          _plan!['red_vial'] == true
+                              ? 'Calles reales'
+                              : 'Estimación',
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                      ],
                     ),
                     Text(
                       '${_visits.length} visitas · ${_plan!['distancia_estimada_km']} km · ${_time(_plan!['inicio_min'])} a ${_time(_plan!['fin_min'])}',

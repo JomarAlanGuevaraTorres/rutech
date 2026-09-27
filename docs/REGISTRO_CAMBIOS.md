@@ -31,4 +31,5 @@ Validaciones ejecutadas:
 - Se agregó selección de agencia, resumen P1-P4, listado filtrable y mapa de clientes.
 - La ruta VRPTW ahora se muestra en el mapa con su orden, horario, distancia y retorno a la agencia.
 - Se incorporó el inicio de jornada, navegación GPS y registro del resultado de cada visita.
+- Se reemplazaron los segmentos rectos por una matriz de conducción y una polilínea vial de OSRM/OpenStreetMap.
 

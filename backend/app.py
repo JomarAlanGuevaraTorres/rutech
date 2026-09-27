@@ -45,7 +45,15 @@ def plan(
         data, agency_data = load_workbook(DATA_FILE)
         if asesores > 1:
             return build_multi_plan(data, agency_data, agencia.upper(), asesores, max_visitas, inicio_min, fin_min)
-        return build_plan(data, agency_data, agencia.upper(), max_visitas, inicio_min, fin_min)
+        return build_plan(
+            data,
+            agency_data,
+            agencia.upper(),
+            max_visitas,
+            inicio_min,
+            fin_min,
+            use_road_network=True,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

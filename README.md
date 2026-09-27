@@ -20,7 +20,7 @@ En el emulador Android, `10.0.2.2` representa la computadora. En un celular fís
 
 ## Alcance del prototipo
 
-La distancia se estima con Haversine y una velocidad urbana configurable. Esta versión permite validar la lógica sin exponer información de clientes. Antes de un uso real se debe reemplazar la matriz estimada por tiempos viales de OSRM, aplicar autenticación y cifrar la información.
+La aplicación consulta OSRM sobre datos de OpenStreetMap para calcular la matriz de tiempos en automóvil y dibujar la geometría que sigue las calles reales. Si el servicio externo no estuviera disponible, informa que está usando una estimación temporal con Haversine en vez de presentar esa aproximación como una ruta vial. Esta versión permite validar la lógica sin exponer información de clientes. Antes de un uso real se debe desplegar una instancia propia de OSRM, aplicar autenticación y cifrar la información.
 
 ## Flujo funcional móvil
 
